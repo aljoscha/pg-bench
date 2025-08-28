@@ -2,6 +2,7 @@
 """PostgreSQL connection throughput benchmarking tool."""
 
 import asyncio
+import json
 import math
 import resource
 import signal
@@ -322,6 +323,50 @@ def generate_power_of_2_range(min_val: int, max_val: int) -> list[int]:
     return sorted(values)
 
 
+def save_json_results(
+    concurrency_levels: list[int],
+    connections_per_sec: list[float],
+    avg_latencies: list[float],
+    concurrency_min: int,
+    concurrency_max: int,
+    name: Optional[str] = None,
+    url: Optional[str] = None,
+    duration: Optional[int] = None,
+) -> str:
+    """Save benchmark results as JSON.
+
+    Returns:
+        JSON filename
+    """
+    timestamp = datetime.now()
+    timestamp_str = timestamp.strftime("%Y%m%d_%H%M%S")
+    base_name = f"pg_bench_{timestamp_str}"
+    if name:
+        base_name += f"_{name}"
+    base_name += f"_c{concurrency_min}-{concurrency_max}"
+    json_filename = f"{base_name}.json"
+
+    results = {
+        "timestamp": timestamp.isoformat(),
+        "name": name,
+        "url": url.split("@")[-1] if url and "@" in url else url,
+        "duration_per_run": duration,
+        "concurrency_min": concurrency_min,
+        "concurrency_max": concurrency_max,
+        "results": [
+            {"concurrency": c, "connections_per_sec": rate, "avg_latency_ms": latency}
+            for c, rate, latency in zip(
+                concurrency_levels, connections_per_sec, avg_latencies
+            )
+        ],
+    }
+
+    with open(json_filename, "w") as f:
+        json.dump(results, f, indent=2)
+
+    return json_filename
+
+
 def save_plots(
     concurrency_levels: list[int],
     connections_per_sec: list[float],
@@ -471,6 +516,20 @@ async def run_async(
         ):
             click.echo(f"{c:<15} {rate:<20.1f} {latency:<20.2f}")
 
+        # Save JSON results
+        click.echo("\nSaving raw results...")
+        json_filename = save_json_results(
+            concurrency_levels,
+            connections_per_sec,
+            avg_latencies,
+            concurrency_min,
+            concurrency_max,
+            name,
+            url,
+            duration,
+        )
+        click.echo(f"✅ Raw results saved to: {json_filename}")
+
         # Generate and save plots
         click.echo("\nGenerating performance plots...")
         plot_filename, _ = save_plots(
@@ -481,7 +540,7 @@ async def run_async(
             concurrency_max,
             name,
         )
-        click.echo(f"\n✅ Performance plots saved to: {plot_filename}")
+        click.echo(f"✅ Performance plots saved to: {plot_filename}")
 
     else:
         # Single concurrency mode
@@ -490,7 +549,146 @@ async def run_async(
         await run_single_benchmark(url, concurrency, duration, quiet=False)
 
 
-@click.command()
+def plot_from_json(
+    json_files: list[str],
+    output_name: Optional[str] = None,
+) -> None:
+    """Load multiple JSON result files and create combined plots."""
+    all_data = []
+
+    # Load all JSON files
+    for json_file in json_files:
+        try:
+            with open(json_file) as f:
+                data = json.load(f)
+                all_data.append(data)
+                name = data.get("name", "unnamed")
+                timestamp = data.get("timestamp", "no timestamp")
+                click.echo(f"Loaded: {json_file} ({name} - {timestamp})")
+        except Exception as e:
+            click.echo(f"Error loading {json_file}: {e}", err=True)
+            continue
+
+    if not all_data:
+        click.echo("No valid JSON files loaded.", err=True)
+        return
+
+    # Create figure with two subplots
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
+
+    # Colors for different datasets
+    colors = [
+        "#1f77b4",
+        "#ff7f0e",
+        "#2ca02c",
+        "#d62728",
+        "#9467bd",
+        "#8c564b",
+        "#e377c2",
+        "#7f7f7f",
+        "#bcbd22",
+        "#17becf",
+    ]
+    markers = ["o", "s", "^", "v", "D", "p", "*", "h", "X", "+"]
+
+    # Plot each dataset
+    for idx, data in enumerate(all_data):
+        color = colors[idx % len(colors)]
+        marker = markers[idx % len(markers)]
+
+        results = data["results"]
+        concurrency_levels = [r["concurrency"] for r in results]
+        connections_per_sec = [r["connections_per_sec"] for r in results]
+        avg_latencies = [r["avg_latency_ms"] for r in results]
+
+        label = data.get("name", f"Run {idx + 1}")
+        if data.get("timestamp"):
+            timestamp = datetime.fromisoformat(data["timestamp"])
+            label += f" ({timestamp.strftime('%Y-%m-%d %H:%M')})"
+
+        # Plot connections per second
+        ax1.plot(
+            concurrency_levels,
+            connections_per_sec,
+            color=color,
+            marker=marker,
+            linewidth=2,
+            markersize=8,
+            label=label,
+            alpha=0.8,
+        )
+
+        # Plot average latency
+        ax2.plot(
+            concurrency_levels,
+            avg_latencies,
+            color=color,
+            marker=marker,
+            linewidth=2,
+            markersize=8,
+            label=label,
+            alpha=0.8,
+        )
+
+    # Configure connections/sec plot
+    ax1.set_xlabel("Concurrency (workers)", fontsize=12)
+    ax1.set_ylabel("Connections per Second", fontsize=12)
+    ax1.set_title(
+        "Connection Throughput vs Concurrency", fontsize=14, fontweight="bold"
+    )
+    ax1.grid(True, alpha=0.3)
+    ax1.set_xscale("log", base=2)
+    ax1.legend(loc="best", fontsize=9)
+
+    # Configure latency plot
+    ax2.set_xlabel("Concurrency (workers)", fontsize=12)
+    ax2.set_ylabel("Average Latency (ms)", fontsize=12)
+    ax2.set_title("Average Latency vs Concurrency", fontsize=14, fontweight="bold")
+    ax2.grid(True, alpha=0.3)
+    ax2.set_xscale("log", base=2)
+    ax2.legend(loc="best", fontsize=9)
+
+    # Add overall title
+    title = "PostgreSQL Connection Benchmark Comparison"
+    if output_name:
+        title += f": {output_name}"
+    title += f"\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+
+    plt.suptitle(title, fontsize=16, fontweight="bold")
+    plt.tight_layout()
+
+    # Save the plot
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_name = f"pg_bench_comparison_{timestamp}"
+    if output_name:
+        base_name += f"_{output_name}"
+
+    try:
+        svg_filename = f"{base_name}.svg"
+        plt.savefig(svg_filename, format="svg", dpi=150, bbox_inches="tight")
+        plt.close()
+        click.echo(f"\n✅ Comparison plot saved to: {svg_filename}")
+    except Exception as e:
+        click.echo(f"Warning: Could not save as SVG ({e}), saving as PNG instead")
+        png_filename = f"{base_name}.png"
+        plt.savefig(png_filename, format="png", dpi=150, bbox_inches="tight")
+        plt.close()
+        click.echo(f"\n✅ Comparison plot saved to: {png_filename}")
+
+
+@click.group(invoke_without_command=True)
+@click.pass_context
+def cli(ctx):
+    """PostgreSQL connection throughput benchmarking tool.
+
+    Run benchmarks or plot results from saved JSON files.
+    """
+    # If no subcommand is provided, show help
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+
+
+@cli.command()
 @click.option(
     "--url",
     "-u",
@@ -531,7 +729,7 @@ async def run_async(
     default=None,
     help="Optional name for the benchmark run (included in output files and plots)",
 )
-def main(
+def run(
     url: str,
     concurrency: Optional[int],
     concurrency_min: Optional[int],
@@ -539,7 +737,7 @@ def main(
     duration: int,
     name: Optional[str],
 ):
-    """Benchmark PostgreSQL connection creation/closing throughput.
+    """Run benchmarks on a PostgreSQL database.
 
     Supports two modes:
     1. Single concurrency: Use --concurrency/-c
@@ -582,5 +780,23 @@ def main(
         pass
 
 
+@cli.command()
+@click.argument("json_files", nargs=-1, required=True, type=click.Path(exists=True))
+@click.option(
+    "--output-name",
+    "-o",
+    type=str,
+    default=None,
+    help="Optional name for the output comparison plot",
+)
+def plot(json_files: tuple[str, ...], output_name: Optional[str]):
+    """Create comparison plots from multiple benchmark JSON files.
+
+    Example:
+        pg-connection-bench plot result1.json result2.json result3.json
+    """
+    plot_from_json(list(json_files), output_name)
+
+
 if __name__ == "__main__":
-    main()
+    cli()

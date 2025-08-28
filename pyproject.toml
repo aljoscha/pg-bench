@@ -19,7 +19,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project.scripts]
-pg-connection-bench = "pg_connection_bench:main"
+pg-connection-bench = "pg_connection_bench:cli"
 pg-connection-load = "pg_connection_load:main"
 
 [tool.ruff]
