@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """PostgreSQL connection load testing tool."""
 
+import asyncio
+import resource
 import signal
 import sys
-import threading
-import time
 from typing import Optional
 
+import asyncpg
 import click
-import psycopg2
-from psycopg2 import OperationalError
 
 
 class ConnectionPool:
@@ -18,84 +17,186 @@ class ConnectionPool:
     def __init__(self, postgres_url: str, num_connections: int):
         self.postgres_url = postgres_url
         self.num_connections = num_connections
-        self.connections: list[Optional[psycopg2.extensions.connection]] = []
-        self.lock = threading.Lock()
+        self.connections: list[Optional[asyncpg.Connection]] = []
         self.shutdown = False
 
-    def open_connections(self) -> None:
+    async def open_connections(self) -> None:
         """Open the specified number of connections to PostgreSQL."""
         click.echo(f"Opening {self.num_connections} connections to PostgreSQL...")
 
+        tasks = []
         for i in range(self.num_connections):
-            try:
-                conn = psycopg2.connect(self.postgres_url)
-                conn.set_session(autocommit=True)
+            tasks.append(self._open_connection(i))
 
-                with conn.cursor() as cursor:
-                    cursor.execute("SELECT 1")
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                self.connections.append(conn)
-                click.echo(f"  ✓ Connection {i + 1}/{self.num_connections} established")
-
-            except OperationalError as e:
-                click.echo(f"  ✗ Failed to establish connection {i + 1}: {e}", err=True)
-                self.connections.append(None)
-            except Exception as e:
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
                 click.echo(
-                    f"  ✗ Unexpected error for connection {i + 1}: {e}", err=True
+                    f"  ✗ Failed to establish connection {i + 1}: {result}", err=True
                 )
                 self.connections.append(None)
+            else:
+                self.connections.append(result)
+                click.echo(f"  ✓ Connection {i + 1}/{self.num_connections} established")
 
         successful = sum(1 for c in self.connections if c is not None)
         click.echo(
             f"\nSuccessfully opened {successful}/{self.num_connections} connections"
         )
 
-    def keep_alive(self) -> None:
+    async def _open_connection(self, index: int) -> asyncpg.Connection:
+        """Open a single connection."""
+        try:
+            conn = await asyncpg.connect(self.postgres_url)
+            await conn.execute("SELECT 1")
+            return conn
+        except OSError as e:
+            if e.errno == 24:  # EMFILE - Too many open files
+                limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+                raise Exception(
+                    f"Connection {index + 1}: Too many open files (EMFILE). "
+                    f"Current limit: {limit}. Try running with fewer connections "
+                    f"or increase ulimit."
+                ) from e
+            else:
+                raise Exception(f"Connection {index + 1}: OS Error: {str(e)}") from e
+        except asyncpg.exceptions.TooManyConnectionsError as e:
+            raise Exception(
+                f"Connection {index + 1}: PostgreSQL server connection "
+                f"limit reached: {str(e)}"
+            ) from e
+        except Exception as e:
+            raise Exception(f"Connection {index + 1}: {e}") from e
+
+    async def keep_alive(self) -> None:
         """Periodically send keepalive queries to maintain connections."""
         while not self.shutdown:
-            time.sleep(30)
+            try:
+                await asyncio.sleep(30)
 
-            if self.shutdown:
+                if self.shutdown:
+                    break
+
+                tasks = []
+                for i, conn in enumerate(self.connections):
+                    if conn is not None and not conn.is_closed():
+                        tasks.append(self._keepalive_query(conn, i))
+
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
+            except asyncio.CancelledError:
                 break
 
-            with self.lock:
-                for _i, conn in enumerate(self.connections):
-                    if conn is not None and not conn.closed:
-                        try:
-                            with conn.cursor() as cursor:
-                                cursor.execute("SELECT 1")
-                        except Exception:
-                            pass
+    async def _keepalive_query(self, conn: asyncpg.Connection, index: int) -> None:
+        """Send a keepalive query on a connection."""
+        try:
+            await conn.execute("SELECT 1")
+        except Exception:
+            pass
 
-    def close_connections(self) -> None:
+    async def close_connections(self) -> None:
         """Close all open connections."""
         click.echo("\nClosing connections...")
         self.shutdown = True
 
-        with self.lock:
-            for i, conn in enumerate(self.connections):
-                if conn is not None and not conn.closed:
-                    try:
-                        conn.close()
-                        click.echo(f"  ✓ Connection {i + 1} closed")
-                    except Exception as e:
-                        click.echo(
-                            f"  ✗ Error closing connection {i + 1}: {e}", err=True
-                        )
+        tasks = []
+        for i, conn in enumerate(self.connections):
+            if conn is not None and not conn.is_closed():
+                tasks.append(self._close_connection(conn, i))
+
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         click.echo("All connections closed")
 
+    async def _close_connection(self, conn: asyncpg.Connection, index: int) -> None:
+        """Close a single connection."""
+        try:
+            await conn.close()
+            click.echo(f"  ✓ Connection {index + 1} closed")
+        except Exception as e:
+            click.echo(f"  ✗ Error closing connection {index + 1}: {e}", err=True)
 
-def signal_handler(pool: ConnectionPool):
-    """Create a signal handler that closes connections on interrupt."""
 
-    def handler(sig, frame):
+async def run_async(url: str, connections: int, duration: int) -> None:
+    """Async implementation of the connection load tester."""
+    # Adjust file descriptor limits if needed
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    needed = connections * 2 + 1000  # Extra buffer for other file descriptors
+
+    if soft < needed:
+        try:
+            new_limit = min(needed, hard)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (new_limit, hard))
+            click.echo(f"Increased file descriptor limit from {soft} to {new_limit}")
+        except Exception as e:
+            click.echo(
+                f"Warning: Could not increase file descriptor limit: {e}", err=True
+            )
+            click.echo(
+                f"Current limit is {soft}, you may hit 'too many open files' errors",
+                err=True,
+            )
+
+    click.echo("PostgreSQL Connection Load Tester")
+    click.echo("================================")
+    click.echo(f"Target: {url.split('@')[-1] if '@' in url else url}")
+    click.echo(f"Connections: {connections}")
+    click.echo(f"Duration: {'infinite' if duration == 0 else f'{duration} seconds'}")
+    click.echo(
+        f"File descriptor limit: {resource.getrlimit(resource.RLIMIT_NOFILE)[0]}"
+    )
+    click.echo()
+
+    pool = ConnectionPool(url, connections)
+
+    # Set up signal handlers for graceful shutdown
+    loop = asyncio.get_event_loop()
+
+    def signal_handler(sig):
         click.echo("\n\nReceived interrupt signal")
-        pool.close_connections()
-        sys.exit(0)
+        pool.shutdown = True
+        # Cancel all running tasks
+        for task in asyncio.all_tasks(loop):
+            task.cancel()
 
-    return handler
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda s=sig: signal_handler(s))
+
+    try:
+        await pool.open_connections()
+
+        if sum(1 for c in pool.connections if c is not None) == 0:
+            click.echo("Failed to establish any connections. Exiting.", err=True)
+            sys.exit(1)
+
+        # Start keepalive task
+        keepalive_task = asyncio.create_task(pool.keep_alive())
+
+        if duration > 0:
+            click.echo(f"\nKeeping connections open for {duration} seconds...")
+            click.echo("Press Ctrl+C to stop early")
+            await asyncio.sleep(duration)
+        else:
+            click.echo("\nKeeping connections open indefinitely...")
+            click.echo("Press Ctrl+C to stop")
+            await asyncio.Event().wait()  # Wait indefinitely
+
+    except asyncio.CancelledError:
+        pass
+    except KeyboardInterrupt:
+        pass
+    finally:
+        pool.shutdown = True
+        try:
+            keepalive_task.cancel()
+            await asyncio.wait_for(keepalive_task, timeout=1)
+        except (asyncio.TimeoutError, asyncio.CancelledError, NameError):
+            pass
+
+        await pool.close_connections()
 
 
 @click.command()
@@ -122,43 +223,10 @@ def signal_handler(pool: ConnectionPool):
 )
 def main(url: str, connections: int, duration: int):
     """Open and maintain idle PostgreSQL connections for load testing."""
-
-    click.echo("PostgreSQL Connection Load Tester")
-    click.echo("================================")
-    click.echo(f"Target: {url.split('@')[-1] if '@' in url else url}")
-    click.echo(f"Connections: {connections}")
-    click.echo(f"Duration: {'infinite' if duration == 0 else f'{duration} seconds'}")
-    click.echo()
-
-    pool = ConnectionPool(url, connections)
-
-    signal.signal(signal.SIGINT, signal_handler(pool))
-    signal.signal(signal.SIGTERM, signal_handler(pool))
-
     try:
-        pool.open_connections()
-
-        if sum(1 for c in pool.connections if c is not None) == 0:
-            click.echo("Failed to establish any connections. Exiting.", err=True)
-            sys.exit(1)
-
-        keepalive_thread = threading.Thread(target=pool.keep_alive, daemon=True)
-        keepalive_thread.start()
-
-        if duration > 0:
-            click.echo(f"\nKeeping connections open for {duration} seconds...")
-            click.echo("Press Ctrl+C to stop early")
-            time.sleep(duration)
-        else:
-            click.echo("\nKeeping connections open indefinitely...")
-            click.echo("Press Ctrl+C to stop")
-            while True:
-                time.sleep(1)
-
+        asyncio.run(run_async(url, connections, duration))
     except KeyboardInterrupt:
         pass
-    finally:
-        pool.close_connections()
 
 
 if __name__ == "__main__":

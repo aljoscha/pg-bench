@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "PostgreSQL connection load testing tool"
 requires-python = ">=3.9"
 dependencies = [
-    "psycopg2-binary>=2.9.9",
+    "asyncpg>=0.29.0",
     "click>=8.1.7",
 ]
 
@@ -41,3 +41,8 @@ quote-style = "double"
 indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "auto"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.12.10",
+]
