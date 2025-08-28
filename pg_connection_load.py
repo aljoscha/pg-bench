@@ -69,33 +69,6 @@ class ConnectionPool:
         except Exception as e:
             raise Exception(f"Connection {index + 1}: {e}") from e
 
-    async def keep_alive(self) -> None:
-        """Periodically send keepalive queries to maintain connections."""
-        while not self.shutdown:
-            try:
-                await asyncio.sleep(30)
-
-                if self.shutdown:
-                    break
-
-                tasks = []
-                for i, conn in enumerate(self.connections):
-                    if conn is not None and not conn.is_closed():
-                        tasks.append(self._keepalive_query(conn, i))
-
-                if tasks:
-                    await asyncio.gather(*tasks, return_exceptions=True)
-
-            except asyncio.CancelledError:
-                break
-
-    async def _keepalive_query(self, conn: asyncpg.Connection, index: int) -> None:
-        """Send a keepalive query on a connection."""
-        try:
-            await conn.execute("SELECT 1")
-        except Exception:
-            pass
-
     async def close_connections(self) -> None:
         """Close all open connections."""
         click.echo("\nClosing connections...")
@@ -172,9 +145,6 @@ async def run_async(url: str, connections: int, duration: int) -> None:
             click.echo("Failed to establish any connections. Exiting.", err=True)
             sys.exit(1)
 
-        # Start keepalive task
-        keepalive_task = asyncio.create_task(pool.keep_alive())
-
         if duration > 0:
             click.echo(f"\nKeeping connections open for {duration} seconds...")
             click.echo("Press Ctrl+C to stop early")
@@ -190,12 +160,6 @@ async def run_async(url: str, connections: int, duration: int) -> None:
         pass
     finally:
         pool.shutdown = True
-        try:
-            keepalive_task.cancel()
-            await asyncio.wait_for(keepalive_task, timeout=1)
-        except (asyncio.TimeoutError, asyncio.CancelledError, NameError):
-            pass
-
         await pool.close_connections()
 
 
@@ -210,7 +174,7 @@ async def run_async(url: str, connections: int, duration: int) -> None:
 @click.option(
     "--connections",
     "-n",
-    type=click.IntRange(min=1, max=10000),
+    type=click.IntRange(min=1),
     default=10,
     help="Number of connections to open (default: 10)",
 )

@@ -30,10 +30,9 @@ uv run ruff format pg_connection_load.py
 
 Single-file Python CLI application using:
 - **Click**: Command-line interface framework for argument parsing
-- **psycopg2**: PostgreSQL database adapter
-- **Threading**: Maintains keepalive thread for connection health checks
+- **asyncpg**: Asynchronous PostgreSQL database adapter
+- **asyncio**: Manages concurrent connections
 
 Key components:
-- `ConnectionPool` class: Manages connection lifecycle with thread-safe operations
+- `ConnectionPool` class: Manages connection lifecycle with async operations
 - Signal handlers: Graceful shutdown on SIGINT/SIGTERM
-- Keepalive mechanism: Sends periodic queries every 30 seconds to prevent connection timeouts
