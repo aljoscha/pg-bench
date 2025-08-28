@@ -1,7 +1,7 @@
 # PostgreSQL Benchmarking Suite
 
-A comprehensive PostgreSQL testing toolkit featuring two specialized tools for
-database performance analysis and stress testing.
+A comprehensive PostgreSQL testing toolkit featuring three specialized tools for
+database performance analysis, stress testing, and workload benchmarking.
 
 ## Tools Included
 
@@ -32,6 +32,21 @@ connection loads by opening and maintaining idle database connections.
 - Tests connection pool limits and maximum connection handling
 - Monitors database behavior under sustained connection load
 - Clean shutdown with connection cleanup
+
+### 3. pg-workload-bench - Workload Benchmarking Tool
+
+A flexible workload benchmarking tool that uses INI configuration files to define
+complex database workloads with setup/teardown queries and multiple concurrent
+workload patterns.
+
+**Key Features:**
+- **INI Configuration**: Define workloads, setup/teardown queries in simple INI format
+- **Multi-Query Workloads**: Execute complex sequences of queries as atomic workloads
+- **Concurrency Sweeps**: Test performance across different concurrency levels
+- **Real-time Metrics**: Monitor queries per second and latency statistics
+- **JSON Output**: Save results for later analysis and comparison
+- **Plotting Support**: Generate comparison plots from multiple benchmark runs
+- **Persistent Connections**: Reuses connections for realistic workload simulation
 
 ## Installation
 
@@ -72,7 +87,11 @@ uv run pg-connection-bench --url postgresql://localhost/testdb --concurrency 50 
 **Command-line Options:**
 - `--url, -u`: PostgreSQL connection URL (can also use DATABASE_URL env var)
 - `--concurrency, -c`: Number of concurrent workers (default: 10)
+- `--concurrency-min`: Minimum concurrency for sweep testing
+- `--concurrency-max`: Maximum concurrency for sweep testing (doubles each run)
 - `--duration, -d`: Test duration in seconds, 0 for indefinite (default: 0)
+- `--name, -n`: Optional name for the benchmark run (included in output files)
+- `--wait-between-runs`: Wait time in seconds between sweep runs (default: 20)
 
 #### Example Output
 
@@ -152,6 +171,83 @@ uv run pg-connection-load --connections 100 --duration 60
 - `--url, -u`: PostgreSQL connection URL (or use DATABASE_URL env var)
 - `--connections, -n`: Number of connections to open (default: 10)
 - `--duration, -d`: How long to hold connections in seconds (default: 0 = indefinite)
+
+#### Plotting Comparison Results
+
+You can create comparison plots from saved benchmark JSON files:
+
+```bash
+# Compare multiple benchmark runs
+uv run pg-connection-bench plot result1.json result2.json result3.json
+
+# With custom output name
+uv run pg-connection-bench plot --output-name "comparison" *.json
+```
+
+### Workload Benchmarking (pg-workload-bench)
+
+Run complex database workloads defined in INI configuration files:
+
+```bash
+# Run a workload benchmark
+uv run pg-workload-bench run --url postgresql://localhost/testdb --workload workload.ini
+
+# With environment variable and custom name
+export DATABASE_URL=postgresql://localhost/testdb
+uv run pg-workload-bench run --workload workload.ini --name "production-test"
+
+# Run with specific wait time between concurrency levels
+uv run pg-workload-bench run --workload workload.ini --wait-between-runs 30
+```
+
+**Command-line Options:**
+- `--url, -u`: PostgreSQL connection URL (or use DATABASE_URL env var)
+- `--workload, -w`: Path to INI workload configuration file
+- `--name, -n`: Optional name for the benchmark run
+- `--wait-between-runs`: Wait time between concurrency runs (default: 20)
+
+#### INI Configuration Format
+
+```ini
+# Global settings (at the top, no section header needed)
+duration=5m                  # Test duration per concurrency level
+concurrency-min=1            # Start at 1 concurrent worker
+concurrency-max=256          # Test up to 256 workers (doubles each run)
+# OR use fixed concurrency:
+# concurrency=50             # Fixed number of workers
+
+[setup]
+query=drop table if exists test_table
+query=create table test_table(id serial primary key, data text)
+query=create index idx_data on test_table(data)
+
+[teardown]
+query=drop table test_table
+
+# Define workloads - each section is a named workload
+[simple select]
+query=select 1
+
+[insert and count]
+query=insert into test_table(data) values ('test')
+query=select count(*) from test_table
+
+[complex workload]
+query=begin
+query=insert into test_table(data) values ('test')
+query=select * from test_table where data = 'test' limit 10
+query=commit
+```
+
+#### Plotting Workload Results
+
+```bash
+# Create comparison plots from multiple benchmark runs
+uv run pg-workload-bench plot result1.json result2.json result3.json
+
+# With custom output name
+uv run pg-workload-bench plot --output-name "workload-comparison" *.json
+```
 
 ## System Requirements
 

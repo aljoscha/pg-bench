@@ -21,6 +21,7 @@ build-backend = "hatchling.build"
 [project.scripts]
 pg-connection-bench = "pg_connection_bench:cli"
 pg-connection-load = "pg_connection_load:main"
+pg-workload-bench = "pg_workload_bench:cli"
 
 [tool.ruff]
 line-length = 88
@@ -54,4 +55,5 @@ packages = ["."]
 include = [
     "pg_connection_bench.py",
     "pg_connection_load.py",
+    "pg_workload_bench.py",
 ]

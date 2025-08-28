@@ -468,6 +468,7 @@ async def run_async(
     concurrency_max: Optional[int],
     duration: int,
     name: Optional[str] = None,
+    wait_between_runs: int = 20,
 ) -> None:
     """Async implementation of the connection benchmark.
 
@@ -481,6 +482,7 @@ async def run_async(
         click.echo(f"Target:            {url.split('@')[-1] if '@' in url else url}")
         click.echo(f"Concurrency Range: {concurrency_min} - {concurrency_max} workers")
         click.echo(f"Duration per run:  {duration} seconds")
+        click.echo(f"Wait between runs: {wait_between_runs} seconds")
         click.echo("=" * 60)
         click.echo()
 
@@ -504,8 +506,8 @@ async def run_async(
 
             # Brief pause between runs
             if i < len(concurrency_levels):
-                click.echo("\nWaiting 2 seconds before next run...")
-                await asyncio.sleep(2)
+                click.echo(f"\nWaiting {wait_between_runs} seconds before next run...")
+                await asyncio.sleep(wait_between_runs)
 
         # Generate summary table
         click.echo("\n" + "=" * 80)
@@ -733,6 +735,12 @@ def cli(ctx):
     default=None,
     help="Optional name for the benchmark run (included in output files and plots)",
 )
+@click.option(
+    "--wait-between-runs",
+    type=click.IntRange(min=0),
+    default=20,
+    help="Wait time in seconds between different concurrency runs (default: 20)",
+)
 def run(
     url: str,
     concurrency: Optional[int],
@@ -740,6 +748,7 @@ def run(
     concurrency_max: Optional[int],
     duration: int,
     name: Optional[str],
+    wait_between_runs: int,
 ):
     """Run benchmarks on a PostgreSQL database.
 
@@ -777,7 +786,7 @@ def run(
     try:
         asyncio.run(
             run_async(
-                url, concurrency, concurrency_min, concurrency_max, duration, name
+                url, concurrency, concurrency_min, concurrency_max, duration, name, wait_between_runs
             )
         )
     except KeyboardInterrupt:
