@@ -1,0 +1,43 @@
+[project]
+name = "pg-connection-load"
+version = "0.1.0"
+description = "PostgreSQL connection load testing tool"
+requires-python = ">=3.9"
+dependencies = [
+    "psycopg2-binary>=2.9.9",
+    "click>=8.1.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.7.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+pg-connection-load = "pg_connection_load:main"
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+]
+ignore = []
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
