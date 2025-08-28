@@ -400,6 +400,7 @@ def save_plots(
     ax1.set_xscale("log", base=2)
     ax1.set_xticks(concurrency_levels)
     ax1.set_xticklabels([str(c) for c in concurrency_levels], rotation=45)
+    ax1.set_ylim(bottom=0)
 
     # Add value labels on the points
     for x, y in zip(concurrency_levels, connections_per_sec):
@@ -421,6 +422,7 @@ def save_plots(
     ax2.set_xscale("log", base=2)
     ax2.set_xticks(concurrency_levels)
     ax2.set_xticklabels([str(c) for c in concurrency_levels], rotation=45)
+    ax2.set_ylim(bottom=0)
 
     # Add value labels on the points
     for x, y in zip(concurrency_levels, avg_latencies):
@@ -638,6 +640,7 @@ def plot_from_json(
     )
     ax1.grid(True, alpha=0.3)
     ax1.set_xscale("log", base=2)
+    ax1.set_ylim(bottom=0)
     ax1.legend(loc="best", fontsize=9)
 
     # Configure latency plot
@@ -646,6 +649,7 @@ def plot_from_json(
     ax2.set_title("Average Latency vs Concurrency", fontsize=14, fontweight="bold")
     ax2.grid(True, alpha=0.3)
     ax2.set_xscale("log", base=2)
+    ax2.set_ylim(bottom=0)
     ax2.legend(loc="best", fontsize=9)
 
     # Add overall title
