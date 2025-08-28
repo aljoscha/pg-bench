@@ -260,17 +260,17 @@ async def run_single_benchmark(
             # Create tasks for workers and reporter
             worker_tasks = [asyncio.create_task(w) for w in workers]
             reporter_task = asyncio.create_task(reporter)
-            
+
             # Wait for the duration
             await asyncio.sleep(duration)
-            
+
             # Signal shutdown
             benchmark.shutdown = True
-            
+
             # Cancel all tasks
             for task in worker_tasks + [reporter_task]:
                 task.cancel()
-            
+
             # Wait for tasks to finish cancellation
             await asyncio.gather(*worker_tasks, reporter_task, return_exceptions=True)
         else:
@@ -328,6 +328,7 @@ def save_plots(
     avg_latencies: list[float],
     concurrency_min: int,
     concurrency_max: int,
+    name: Optional[str] = None,
 ) -> tuple[str, str]:
     """Generate and save performance plots.
 
@@ -335,7 +336,10 @@ def save_plots(
         Tuple of (connections/sec plot filename, latency plot filename)
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_name = f"pg_bench_{timestamp}_c{concurrency_min}-{concurrency_max}"
+    base_name = f"pg_bench_{timestamp}"
+    if name:
+        base_name += f"_{name}"
+    base_name += f"_c{concurrency_min}-{concurrency_max}"
 
     # Create figure with two subplots
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
@@ -384,8 +388,13 @@ def save_plots(
             fontsize=9,
         )
 
+    title = "PostgreSQL Connection Benchmark Results"
+    if name:
+        title += f": {name}"
+    title += f"\n{timestamp}"
+
     plt.suptitle(
-        f"PostgreSQL Connection Benchmark Results\n{timestamp}",
+        title,
         fontsize=16,
         fontweight="bold",
     )
@@ -411,6 +420,7 @@ async def run_async(
     concurrency_min: Optional[int],
     concurrency_max: Optional[int],
     duration: int,
+    name: Optional[str] = None,
 ) -> None:
     """Async implementation of the connection benchmark.
 
@@ -469,6 +479,7 @@ async def run_async(
             avg_latencies,
             concurrency_min,
             concurrency_max,
+            name,
         )
         click.echo(f"\n✅ Performance plots saved to: {plot_filename}")
 
@@ -513,12 +524,20 @@ async def run_async(
     default=10,
     help="Duration in seconds per benchmark run (default: 10)",
 )
+@click.option(
+    "--name",
+    "-n",
+    type=str,
+    default=None,
+    help="Optional name for the benchmark run (included in output files and plots)",
+)
 def main(
     url: str,
     concurrency: Optional[int],
     concurrency_min: Optional[int],
     concurrency_max: Optional[int],
     duration: int,
+    name: Optional[str],
 ):
     """Benchmark PostgreSQL connection creation/closing throughput.
 
@@ -555,7 +574,9 @@ def main(
 
     try:
         asyncio.run(
-            run_async(url, concurrency, concurrency_min, concurrency_max, duration)
+            run_async(
+                url, concurrency, concurrency_min, concurrency_max, duration, name
+            )
         )
     except KeyboardInterrupt:
         pass
