@@ -1,30 +1,168 @@
-# pg-connection-load
+# PostgreSQL Benchmarking Suite
 
-PostgreSQL connection load testing tool for testing connection pool limits and
-database behavior under high connection loads.
+A comprehensive PostgreSQL testing toolkit featuring two specialized tools for
+database performance analysis and stress testing.
+
+## Tools Included
+
+### 1. pg-connection-bench - Throughput Benchmarking Tool
+
+A high-performance tool that measures how many connections per second your
+PostgreSQL database can handle. Perfect for testing connection pool efficiency
+and database connection handling performance.
+
+**Key Features:**
+- **Concurrent Testing**: Configure multiple workers to stress-test connection
+  handling
+- **Real-time Metrics**: Live updates showing connections per second, latency
+  statistics
+- **Latency Analysis**: Detailed latency percentiles and histogram distribution
+- **Graceful Shutdown**: Clean exit on Ctrl+C with comprehensive summary
+  statistics
+- **Smart Error Handling**: Automatic backoff on connection failures
+- **File Descriptor Management**: Automatic adjustment of system limits
+
+### 2. pg-connection-load - Connection Load Testing Tool
+
+Tests PostgreSQL connection pool limits and database behavior under high
+connection loads by opening and maintaining idle database connections.
+
+**Key Features:**
+- Opens and maintains a specified number of idle connections
+- Tests connection pool limits and maximum connection handling
+- Monitors database behavior under sustained connection load
+- Clean shutdown with connection cleanup
 
 ## Installation
 
+### Prerequisites
+
+- Python 3.9+
+- PostgreSQL database to test against
+
+### Setup
+
 ```bash
+# Clone the repository
+git clone https://github.com/aljoscha/pg-bench
+cd pg-bench
+
+# Install dependencies using uv
 uv sync
 ```
 
 ## Usage
+
+### Connection Throughput Benchmarking (pg-connection-bench)
+
+Measure how many connections per second your database can handle:
+
+```bash
+# Using connection URL directly
+uv run pg-connection-bench --url postgresql://user:pass@localhost/dbname --concurrency 50
+
+# Using environment variable
+export DATABASE_URL=postgresql://user:pass@localhost/dbname
+uv run pg-connection-bench --concurrency 100
+
+# Run for specific duration (30 seconds)
+uv run pg-connection-bench --url postgresql://localhost/testdb --concurrency 50 --duration 30
+```
+
+**Command-line Options:**
+- `--url, -u`: PostgreSQL connection URL (can also use DATABASE_URL env var)
+- `--concurrency, -c`: Number of concurrent workers (default: 10)
+- `--duration, -d`: Test duration in seconds, 0 for indefinite (default: 0)
+
+#### Example Output
+
+```
+PostgreSQL Connection Throughput Benchmark
+============================================================
+Target:       localhost/testdb
+Concurrency:  50 workers
+Duration:     indefinite
+FD Limit:     4096
+============================================================
+
+[   1s] Rate:   1250.3 conn/s | Total:    1250 | Failed:     0 | Latency (ms): avg=  39.8 min=  28.3 max=  125.4
+[   2s] Rate:   1285.7 conn/s | Total:    2536 | Failed:     0 | Latency (ms): avg=  38.6 min=  27.9 max=  89.2
+[   3s] Rate:   1301.2 conn/s | Total:    3837 | Failed:     0 | Latency (ms): avg=  38.2 min=  26.8 max=  78.5
+...
+
+^C
+
+Received interrupt signal, shutting down...
+
+============================================================
+Benchmark Summary
+============================================================
+Duration:             15.2 seconds
+Concurrency:          50 workers
+Total Connections:    19523
+Failed Connections:   0
+Success Rate:         100.0%
+Average Rate:         1284.4 connections/second
+
+Latency Statistics:
+  Average:            38.91 ms
+  Minimum:            26.83 ms
+  Maximum:            125.42 ms
+
+Latency Percentiles (ms):
+----------------------------------------
+  p50   :    37.82 ms
+  p75   :    42.15 ms
+  p90   :    48.93 ms
+  p95   :    54.28 ms
+  p99   :    72.41 ms
+  p99.9 :   112.38 ms
+
+Latency Distribution:
+------------------------------------------------------------
+    26.8 -    30.2 ms: ████████                                  1823 ( 9.3%)
+    30.2 -    34.0 ms: ████████████████████                      4521 (23.2%)
+    34.0 -    38.3 ms: ████████████████████████████████████████  9142 (46.8%)
+    38.3 -    43.2 ms: ████████████████                          3621 (18.6%)
+    43.2 -    48.6 ms: ██                                         287 ( 1.5%)
+    48.6 -    54.8 ms: █                                           89 ( 0.5%)
+    54.8 -    61.6 ms: █                                           23 ( 0.1%)
+    61.6 -    69.4 ms: █                                           12 ( 0.1%)
+    69.4 -    78.1 ms: █                                            3 ( 0.0%)
+    78.1 -   125.4 ms: █                                            2 ( 0.0%)
+```
+
+### Connection Load Testing (pg-connection-load)
+
+Test connection pool limits and database behavior under sustained connection load:
 
 ```bash
 # With URL parameter
 uv run pg-connection-load --url "postgresql://user:pass@host/db" --connections 100 --duration 60
 
 # For example, for a local materialize instance
-uv run pg_connection_load.py --url "postgres://materialize@localhost:6875/materialize" -n 10000
+uv run pg-connection-load --url "postgres://materialize@localhost:6875/materialize" -n 10000
 
 # With environment variable
 export DATABASE_URL="postgresql://user:pass@host/db"
 uv run pg-connection-load --connections 100 --duration 60
 ```
 
-## Parameters
+**Command-line Options:**
+- `--url, -u`: PostgreSQL connection URL (or use DATABASE_URL env var)
+- `--connections, -n`: Number of connections to open (default: 10)
+- `--duration, -d`: How long to hold connections in seconds (default: 0 = indefinite)
 
-- `--url`: PostgreSQL connection URL (or use DATABASE_URL env var)
-- `--connections`: Number of connections to open (default: 10)
-- `--duration`: How long to hold connections in seconds (default: 0 = indefinite)
+## System Requirements
+
+The throughput benchmarking tool automatically adjusts file descriptor limits when needed. For very high concurrency testing (>1000 workers), you may need to increase system limits:
+
+```bash
+# Check current limits
+ulimit -n
+
+# Increase limits for current session
+ulimit -n 65536
+
+# For permanent changes, edit /etc/security/limits.conf
+```
