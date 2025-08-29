@@ -365,9 +365,9 @@ async def run_async(
     "--keep-alive-interval",
     "-k",
     type=click.IntRange(min=0),
-    default=60,
+    default=600,
     help="Interval in seconds for keep-alive queries, staggered across "
-    "connections (0 = disabled, default: 60)",
+    "connections (0 = disabled, default: 600)",
 )
 def main(
     url: str,
