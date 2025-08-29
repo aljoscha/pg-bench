@@ -239,6 +239,7 @@ async def run_single_workload_benchmark(
 
     benchmark = None
     reporter = None
+    cancelled = False
     
     try:
         if not quiet:
@@ -289,16 +290,20 @@ async def run_single_workload_benchmark(
         # Wait for tasks to finish
         await asyncio.gather(*worker_tasks, reporter_task, return_exceptions=True)
 
-    except (asyncio.CancelledError, KeyboardInterrupt):
-        # Suppress the exceptions - they're expected during shutdown
-        pass
+    except (asyncio.CancelledError, KeyboardInterrupt) as e:
+        # Mark that we were cancelled but still need to cleanup
+        cancelled = True
     finally:
         if benchmark:
             benchmark.shutdown = True
             await benchmark.cleanup_connections()
             await asyncio.sleep(0.1)
-            if not quiet:
+            if not quiet and not cancelled:
                 benchmark.print_summary()
+        
+        # Re-raise the cancellation after cleanup
+        if cancelled:
+            raise asyncio.CancelledError()
 
     # Calculate metrics
     duration = time.time() - benchmark.stats.start_time
