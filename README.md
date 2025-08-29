@@ -29,6 +29,8 @@ connection loads by opening and maintaining idle database connections.
 
 **Key Features:**
 - Opens and maintains a specified number of idle connections
+- **Batch Opening**: Opens connections in configurable batches to reduce load spikes
+- **Pacing Control**: Optional pause between batches for gentler ramp-up
 - Tests connection pool limits and maximum connection handling
 - Monitors database behavior under sustained connection load
 - Clean shutdown with connection cleanup
@@ -156,8 +158,12 @@ Latency Distribution:
 Test connection pool limits and database behavior under sustained connection load:
 
 ```bash
-# With URL parameter
+# Basic usage
 uv run pg-connection-load --url "postgresql://user:pass@host/db" --connections 100 --duration 60
+
+# Open connections in smaller batches with pauses (gentler on the server)
+uv run pg-connection-load --url "postgresql://localhost/testdb" --connections 1000 \
+  --batch-size 50 --batch-pause 0.5
 
 # For example, for a local materialize instance
 uv run pg-connection-load --url "postgres://materialize@localhost:6875/materialize" -n 10000
@@ -171,6 +177,8 @@ uv run pg-connection-load --connections 100 --duration 60
 - `--url, -u`: PostgreSQL connection URL (or use DATABASE_URL env var)
 - `--connections, -n`: Number of connections to open (default: 10)
 - `--duration, -d`: How long to hold connections in seconds (default: 0 = indefinite)
+- `--batch-size, -b`: Number of connections to open in each batch (default: 20)
+- `--batch-pause, -p`: Pause in seconds between batches (default: 0.0, no pause)
 
 #### Plotting Comparison Results
 

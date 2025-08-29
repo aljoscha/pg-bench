@@ -19,31 +19,57 @@ from pg_bench_common.system import (
 class ConnectionPool:
     """Manages a pool of idle PostgreSQL connections."""
 
-    def __init__(self, postgres_url: str, num_connections: int):
+    def __init__(self, postgres_url: str, num_connections: int, batch_size: int = 20, batch_pause: float = 0.0):
         self.postgres_url = postgres_url
         self.num_connections = num_connections
+        self.batch_size = batch_size
+        self.batch_pause = batch_pause
         self.connections: list[Optional[asyncpg.Connection]] = []
         self.shutdown = False
 
     async def open_connections(self) -> None:
-        """Open the specified number of connections to PostgreSQL."""
-        click.echo(f"Opening {self.num_connections} connections to PostgreSQL...")
+        """Open the specified number of connections to PostgreSQL in batches."""
+        batch_info = f" (batch size: {self.batch_size}" + (f", {self.batch_pause}s pause between batches)" if self.batch_pause > 0 else ")")
+        click.echo(f"Opening {self.num_connections} connections to PostgreSQL{batch_info}...")
 
-        tasks = []
-        for i in range(self.num_connections):
-            tasks.append(self._open_connection(i))
+        # Calculate batches
+        num_batches = (self.num_connections + self.batch_size - 1) // self.batch_size
+        
+        for batch_num in range(num_batches):
+            if self.shutdown:
+                break
+            
+            # Calculate batch range
+            start_idx = batch_num * self.batch_size
+            end_idx = min(start_idx + self.batch_size, self.num_connections)
+            batch_size = end_idx - start_idx
+            
+            click.echo(f"  Opening batch {batch_num + 1}/{num_batches} ({batch_size} connections)...")
+            
+            # Open connections in parallel within this batch
+            tasks = []
+            for i in range(start_idx, end_idx):
+                tasks.append(self._open_connection(i))
+            
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Process results for this batch
+            for i, result in enumerate(results):
+                connection_num = start_idx + i + 1
+                if isinstance(result, Exception):
+                    click.echo(
+                        f"    ✗ Failed to establish connection {connection_num}: {result}", err=True
+                    )
+                    self.connections.append(None)
+                else:
+                    self.connections.append(result)
+                    click.echo(f"    ✓ Connection {connection_num}/{self.num_connections} established")
+            
+            # Pause between batches (except for the last batch)
+            if batch_num < num_batches - 1 and self.batch_pause > 0 and not self.shutdown:
+                click.echo(f"    Pausing {self.batch_pause}s before next batch...")
+                await asyncio.sleep(self.batch_pause)
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                click.echo(
-                    f"  ✗ Failed to establish connection {i + 1}: {result}", err=True
-                )
-                self.connections.append(None)
-            else:
-                self.connections.append(result)
-                click.echo(f"  ✓ Connection {i + 1}/{self.num_connections} established")
 
         successful = sum(1 for c in self.connections if c is not None)
         click.echo(
@@ -97,7 +123,7 @@ class ConnectionPool:
             click.echo(f"  ✗ Error closing connection {index + 1}: {e}", err=True)
 
 
-async def run_async(url: str, connections: int, duration: int) -> None:
+async def run_async(url: str, connections: int, duration: int, batch_size: int, batch_pause: float) -> None:
     """Async implementation of the connection load tester."""
     # Adjust file descriptor limits if needed
     needed_fds = connections * 2 + 1000  # Extra buffer for other file descriptors
@@ -112,7 +138,7 @@ async def run_async(url: str, connections: int, duration: int) -> None:
     click.echo(f"File descriptor limit: {get_current_fd_limit()}")
     click.echo()
 
-    pool = ConnectionPool(url, connections)
+    pool = ConnectionPool(url, connections, batch_size, batch_pause)
 
     def shutdown_handler(sig):
         click.echo("\n\nReceived interrupt signal")
@@ -171,10 +197,24 @@ async def run_async(url: str, connections: int, duration: int) -> None:
     default=0,
     help="Duration in seconds to keep connections open (0 = infinite, default: 0)",
 )
-def main(url: str, connections: int, duration: int):
+@click.option(
+    "--batch-size",
+    "-b",
+    type=click.IntRange(min=1),
+    default=20,
+    help="Number of connections to open in each batch (default: 20)",
+)
+@click.option(
+    "--batch-pause",
+    "-p",
+    type=click.FloatRange(min=0.0),
+    default=0.0,
+    help="Pause in seconds between batches (default: 0.0, no pause)",
+)
+def main(url: str, connections: int, duration: int, batch_size: int, batch_pause: float):
     """Open and maintain idle PostgreSQL connections for load testing."""
     try:
-        asyncio.run(run_async(url, connections, duration))
+        asyncio.run(run_async(url, connections, duration, batch_size, batch_pause))
     except KeyboardInterrupt:
         pass
 
