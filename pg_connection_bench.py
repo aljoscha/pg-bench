@@ -34,8 +34,8 @@ class BenchmarkStats:
 class ConnectionBenchmark:
     """Benchmarks PostgreSQL connection creation/closing throughput."""
 
-    def __init__(self, postgres_url: str, concurrency: int):
-        self.postgres_url = postgres_url
+    def __init__(self, postgres_urls: list[str], concurrency: int):
+        self.postgres_urls = postgres_urls
         self.concurrency = concurrency
         self.shutdown = False
         self.stats = BenchmarkStats()
@@ -43,11 +43,15 @@ class ConnectionBenchmark:
 
     async def worker(self, worker_id: int) -> None:
         """Worker that continuously opens and closes connections."""
+        # Assign this worker to a specific URL using round-robin
+        url_index = worker_id % len(self.postgres_urls)
+        postgres_url = self.postgres_urls[url_index]
+        
         while not self.shutdown:
             try:
                 start = time.perf_counter()
 
-                conn = await asyncpg.connect(self.postgres_url, timeout=30)
+                conn = await asyncpg.connect(postgres_url, timeout=30)
                 await conn.execute("SELECT 1")
                 await conn.close()
 
@@ -205,7 +209,7 @@ class ConnectionBenchmark:
 
 
 async def run_single_benchmark(
-    url: str, concurrency: int, duration: int, quiet: bool = False
+    urls: list[str], concurrency: int, duration: int, quiet: bool = False
 ) -> tuple[float, float, list[float]]:
     """Run a single benchmark at a specific concurrency level.
 
@@ -232,7 +236,13 @@ async def run_single_benchmark(
     if not quiet:
         click.echo("PostgreSQL Connection Throughput Benchmark")
         click.echo("=" * 60)
-        click.echo(f"Target:       {url.split('@')[-1] if '@' in url else url}")
+        targets = [url.split('@')[-1] if '@' in url else url for url in urls]
+        if len(targets) == 1:
+            click.echo(f"Target:       {targets[0]}")
+        else:
+            click.echo(f"Targets ({len(targets)} servers):")
+            for i, target in enumerate(targets, 1):
+                click.echo(f"  {i}. {target}")
         click.echo(f"Concurrency:  {concurrency} workers")
         duration_str = "indefinite" if duration == 0 else f"{duration} seconds"
         click.echo(f"Duration:     {duration_str}")
@@ -240,7 +250,7 @@ async def run_single_benchmark(
         click.echo("=" * 60)
         click.echo()
 
-    benchmark = ConnectionBenchmark(url, concurrency)
+    benchmark = ConnectionBenchmark(urls, concurrency)
 
     loop = asyncio.get_event_loop()
 
@@ -296,7 +306,11 @@ async def run_single_benchmark(
         else 0
     )
     # Sample latencies for visualization (up to 10000 samples)
-    latency_samples = benchmark.stats.latencies[:10000] if len(benchmark.stats.latencies) > 10000 else benchmark.stats.latencies.copy()
+    latency_samples = (
+        benchmark.stats.latencies[:10000]
+        if len(benchmark.stats.latencies) > 10000
+        else benchmark.stats.latencies.copy()
+    )
     return avg_rate, avg_latency, latency_samples
 
 
@@ -358,14 +372,20 @@ def save_json_results(
         "concurrency_max": concurrency_max,
         "results": [
             {
-                "concurrency": c, 
-                "connections_per_sec": rate, 
+                "concurrency": c,
+                "connections_per_sec": rate,
                 "avg_latency_ms": latency,
                 "latency_percentiles": {
-                    "p50": float(sorted(samples)[len(samples)//2]) if samples else 0,
-                    "p95": float(sorted(samples)[int(len(samples)*0.95)]) if samples else 0,
-                    "p99": float(sorted(samples)[int(len(samples)*0.99)]) if samples else 0,
-                } if samples else {}
+                    "p50": float(sorted(samples)[len(samples) // 2]) if samples else 0,
+                    "p95": float(sorted(samples)[int(len(samples) * 0.95)])
+                    if samples
+                    else 0,
+                    "p99": float(sorted(samples)[int(len(samples) * 0.99)])
+                    if samples
+                    else 0,
+                }
+                if samples
+                else {},
             }
             for c, rate, latency, samples in zip(
                 concurrency_levels, connections_per_sec, avg_latencies, latency_samples
@@ -429,7 +449,7 @@ def save_plots(
     # Plot latency distribution as violin plot
     # Prepare data for violin plot
     positions = list(range(len(concurrency_levels)))
-    
+
     # Create violin plot
     parts = ax2.violinplot(
         latency_samples,
@@ -437,26 +457,26 @@ def save_plots(
         widths=0.7,
         showmeans=True,
         showextrema=True,
-        showmedians=True
+        showmedians=True,
     )
-    
+
     # Customize violin plot colors
-    for pc in parts['bodies']:
-        pc.set_facecolor('#ff7f0e')
+    for pc in parts["bodies"]:
+        pc.set_facecolor("#ff7f0e")
         pc.set_alpha(0.7)
-    
+
     ax2.set_xlabel("Concurrency (workers)", fontsize=12)
     ax2.set_ylabel("Latency (ms)", fontsize=12)
     ax2.set_title("Latency Distribution vs Concurrency", fontsize=14, fontweight="bold")
-    ax2.grid(True, alpha=0.3, axis='y')
+    ax2.grid(True, alpha=0.3, axis="y")
     ax2.set_xticks(positions)
     ax2.set_xticklabels([str(c) for c in concurrency_levels], rotation=45)
     ax2.set_ylim(bottom=0)
-    
+
     # Add median values as text annotations
     for i, (pos, samples) in enumerate(zip(positions, latency_samples)):
         if samples:
-            median = sorted(samples)[len(samples)//2]
+            median = sorted(samples)[len(samples) // 2]
             ax2.annotate(
                 f"{median:.1f}",
                 (pos, median),
@@ -464,7 +484,7 @@ def save_plots(
                 xytext=(0, -15),
                 ha="center",
                 fontsize=8,
-                color='darkred'
+                color="darkred",
             )
 
     title = "PostgreSQL Connection Benchmark Results"
@@ -494,7 +514,7 @@ def save_plots(
 
 
 async def run_async(
-    url: str,
+    urls: list[str],
     concurrency: Optional[int],
     concurrency_min: Optional[int],
     concurrency_max: Optional[int],
@@ -511,7 +531,13 @@ async def run_async(
         # Range mode
         click.echo("PostgreSQL Connection Throughput Benchmark - Range Mode")
         click.echo("=" * 60)
-        click.echo(f"Target:            {url.split('@')[-1] if '@' in url else url}")
+        targets = [url.split('@')[-1] if '@' in url else url for url in urls]
+        if len(targets) == 1:
+            click.echo(f"Target:            {targets[0]}")
+        else:
+            click.echo(f"Targets ({len(targets)} servers):")
+            for i, target in enumerate(targets, 1):
+                click.echo(f"  {i}. {target}")
         click.echo(f"Concurrency Range: {concurrency_min} - {concurrency_max} workers")
         click.echo(f"Duration per run:  {duration} seconds")
         click.echo(f"Wait between runs: {wait_between_runs} seconds")
@@ -532,7 +558,7 @@ async def run_async(
             click.echo(f"{'=' * 60}\n")
 
             avg_rate, avg_latency, samples = await run_single_benchmark(
-                url, c, duration, quiet=False
+                urls, c, duration, quiet=False
             )
             connections_per_sec.append(avg_rate)
             avg_latencies.append(avg_latency)
@@ -564,7 +590,7 @@ async def run_async(
             concurrency_min,
             concurrency_max,
             name,
-            url,
+            ','.join(urls),
             duration,
         )
         click.echo(f"✅ Raw results saved to: {json_filename}")
@@ -586,7 +612,7 @@ async def run_async(
         # Single concurrency mode
         if concurrency is None:
             concurrency = 10  # Default value
-        await run_single_benchmark(url, concurrency, duration, quiet=False)
+        await run_single_benchmark(urls, concurrency, duration, quiet=False)
 
 
 def plot_from_json(
@@ -735,7 +761,8 @@ def cli(ctx):
     "--url",
     "-u",
     required=True,
-    help="PostgreSQL connection URL (e.g., postgresql://user:pass@localhost/dbname)",
+    multiple=True,
+    help="PostgreSQL connection URL (can be specified multiple times for round-robin distribution)",
     envvar="DATABASE_URL",
 )
 @click.option(
@@ -778,7 +805,7 @@ def cli(ctx):
     help="Wait time in seconds between different concurrency runs (default: 20)",
 )
 def run(
-    url: str,
+    url: tuple[str, ...],
     concurrency: Optional[int],
     concurrency_min: Optional[int],
     concurrency_max: Optional[int],
@@ -786,13 +813,15 @@ def run(
     name: Optional[str],
     wait_between_runs: int,
 ):
-    """Run benchmarks on a PostgreSQL database.
+    """Run benchmarks on PostgreSQL database(s).
 
     Supports two modes:
     1. Single concurrency: Use --concurrency/-c
     2. Range mode: Use --concurrency-min and --concurrency-max to test multiple levels
 
     In range mode, tests powers of 2 between min and max values.
+    
+    When multiple URLs are provided, connections are distributed round-robin across servers.
     """
     # Validate arguments
     if concurrency is not None and (
@@ -819,10 +848,19 @@ def run(
         # Default to single mode with concurrency=10
         concurrency = 10
 
+    # Convert tuple to list
+    urls = list(url)
+    
     try:
         asyncio.run(
             run_async(
-                url, concurrency, concurrency_min, concurrency_max, duration, name, wait_between_runs
+                urls,
+                concurrency,
+                concurrency_min,
+                concurrency_max,
+                duration,
+                name,
+                wait_between_runs,
             )
         )
     except KeyboardInterrupt:

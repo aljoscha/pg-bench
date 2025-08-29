@@ -159,8 +159,8 @@ def parse_ini_config(config_path: Path) -> BenchmarkConfig:
 class WorkloadBenchmark:
     """Benchmarks PostgreSQL workload throughput."""
 
-    def __init__(self, postgres_url: str, concurrency: int, workload: WorkloadConfig):
-        self.postgres_url = postgres_url
+    def __init__(self, postgres_urls: list[str], concurrency: int, workload: WorkloadConfig):
+        self.postgres_urls = postgres_urls
         self.concurrency = concurrency
         self.workload = workload
         self.shutdown = False
@@ -172,7 +172,10 @@ class WorkloadBenchmark:
         """Create and store persistent connections."""
         for i in range(self.concurrency):
             try:
-                conn = await asyncpg.connect(self.postgres_url, timeout=30)
+                # Round-robin distribution across URLs
+                url_index = i % len(self.postgres_urls)
+                postgres_url = self.postgres_urls[url_index]
+                conn = await asyncpg.connect(postgres_url, timeout=30)
                 self.connections.append(conn)
             except Exception as e:
                 click.echo(f"Failed to create connection {i + 1}: {e}", err=True)
@@ -345,12 +348,14 @@ class WorkloadBenchmark:
             self.print_histogram()
 
 
-async def run_setup(postgres_url: str, setup_queries: list[str]) -> None:
-    """Run setup queries before benchmark."""
+async def run_setup(postgres_urls: list[str], setup_queries: list[str]) -> None:
+    """Run setup queries before benchmark on the first server."""
     if not setup_queries:
         return
 
     click.echo("\nRunning setup queries...")
+    # Only run on the first server since they share the same data store
+    postgres_url = postgres_urls[0]
     conn = await asyncpg.connect(postgres_url, timeout=30)
     try:
         for query in setup_queries:
@@ -361,12 +366,14 @@ async def run_setup(postgres_url: str, setup_queries: list[str]) -> None:
         await conn.close()
 
 
-async def run_teardown(postgres_url: str, teardown_queries: list[str]) -> None:
-    """Run teardown queries after benchmark."""
+async def run_teardown(postgres_urls: list[str], teardown_queries: list[str]) -> None:
+    """Run teardown queries after benchmark on the first server."""
     if not teardown_queries:
         return
 
     click.echo("\nRunning teardown queries...")
+    # Only run on the first server since they share the same data store
+    postgres_url = postgres_urls[0]
     conn = await asyncpg.connect(postgres_url, timeout=30)
     try:
         for query in teardown_queries:
@@ -378,7 +385,7 @@ async def run_teardown(postgres_url: str, teardown_queries: list[str]) -> None:
 
 
 async def run_single_workload_benchmark(
-    url: str,
+    urls: list[str],
     concurrency: int,
     duration: int,
     workload: WorkloadConfig,
@@ -415,7 +422,7 @@ async def run_single_workload_benchmark(
         click.echo("-" * 60)
         click.echo()
 
-    benchmark = WorkloadBenchmark(url, concurrency, workload)
+    benchmark = WorkloadBenchmark(urls, concurrency, workload)
 
     # Setup connections
     await benchmark.setup_connections()
@@ -474,7 +481,11 @@ async def run_single_workload_benchmark(
         else 0
     )
     # Sample latencies for visualization (up to 10000 samples)
-    latency_samples = benchmark.stats.latencies[:10000] if len(benchmark.stats.latencies) > 10000 else benchmark.stats.latencies.copy()
+    latency_samples = (
+        benchmark.stats.latencies[:10000]
+        if len(benchmark.stats.latencies) > 10000
+        else benchmark.stats.latencies.copy()
+    )
     return workload.name, avg_rate, avg_latency, latency_samples
 
 
@@ -548,15 +559,15 @@ def save_json_results(
             result = {
                 "concurrency": r["concurrency"],
                 "queries_per_sec": r["queries_per_sec"],
-                "avg_latency_ms": r["avg_latency_ms"]
+                "avg_latency_ms": r["avg_latency_ms"],
             }
             if "latency_samples" in r and r["latency_samples"]:
                 samples = r["latency_samples"]
                 sorted_samples = sorted(samples)
                 result["latency_percentiles"] = {
-                    "p50": float(sorted_samples[len(sorted_samples)//2]),
-                    "p95": float(sorted_samples[int(len(sorted_samples)*0.95)]),
-                    "p99": float(sorted_samples[int(len(sorted_samples)*0.99)])
+                    "p50": float(sorted_samples[len(sorted_samples) // 2]),
+                    "p95": float(sorted_samples[int(len(sorted_samples) * 0.95)]),
+                    "p99": float(sorted_samples[int(len(sorted_samples) * 0.99)]),
                 }
             enhanced_results.append(result)
         results["workloads"][workload_name] = {"results": enhanced_results}
@@ -648,13 +659,13 @@ def save_plots(
 
         # Plot latency distribution as violin plot (right column)
         ax2 = axes[idx, 1]
-        
+
         # Prepare data for violin plot
         positions = list(range(len(concurrency_levels)))
-        
+
         # Filter out empty sample lists
         valid_samples = [s if s else [0] for s in latency_samples]
-        
+
         # Create violin plot
         if any(len(s) > 0 for s in valid_samples):
             parts = ax2.violinplot(
@@ -663,26 +674,28 @@ def save_plots(
                 widths=0.7,
                 showmeans=True,
                 showextrema=True,
-                showmedians=True
+                showmedians=True,
             )
-            
+
             # Customize violin plot colors
-            for pc in parts['bodies']:
+            for pc in parts["bodies"]:
                 pc.set_facecolor(color)
                 pc.set_alpha(0.7)
-        
+
         ax2.set_xlabel("Concurrency (workers)", fontsize=11)
         ax2.set_ylabel("Latency (ms)", fontsize=11)
-        ax2.set_title(f"Latency Distribution: {workload_name}", fontsize=12, fontweight="bold")
-        ax2.grid(True, alpha=0.3, axis='y')
+        ax2.set_title(
+            f"Latency Distribution: {workload_name}", fontsize=12, fontweight="bold"
+        )
+        ax2.grid(True, alpha=0.3, axis="y")
         ax2.set_xticks(positions)
         ax2.set_xticklabels([str(c) for c in concurrency_levels], rotation=45)
         ax2.set_ylim(bottom=0)
-        
+
         # Add median values as text annotations
         for i, (pos, samples) in enumerate(zip(positions, valid_samples)):
             if samples and len(samples) > 0:
-                median = sorted(samples)[len(samples)//2]
+                median = sorted(samples)[len(samples) // 2]
                 ax2.annotate(
                     f"{median:.1f}",
                     (pos, median),
@@ -690,7 +703,7 @@ def save_plots(
                     xytext=(0, -15),
                     ha="center",
                     fontsize=8,
-                    color='darkred'
+                    color="darkred",
                 )
 
     title = "PostgreSQL Workload Benchmark Results"
@@ -716,7 +729,7 @@ def save_plots(
 
 
 async def run_async(
-    url: str,
+    urls: list[str],
     workload_path: str,
     name: Optional[str],
     wait_between_runs: int,
@@ -733,7 +746,7 @@ async def run_async(
         raise click.ClickException(f"Error parsing workload: {e}") from e
 
     # Run setup queries
-    await run_setup(url, benchmark_config.setup_queries)
+    await run_setup(urls, benchmark_config.setup_queries)
 
     try:
         # Determine if we're in range mode or single mode
@@ -742,9 +755,13 @@ async def run_async(
             click.echo("PostgreSQL Workload Benchmark - Range Mode")
             click.echo("=" * 60)
             click.echo(f"Workload:          {workload_path}")
-            click.echo(
-                f"Target:            {url.split('@')[-1] if '@' in url else url}"
-            )
+            targets = [url.split('@')[-1] if '@' in url else url for url in urls]
+            if len(targets) == 1:
+                click.echo(f"Target:            {targets[0]}")
+            else:
+                click.echo(f"Targets ({len(targets)} servers):")
+                for i, target in enumerate(targets, 1):
+                    click.echo(f"  {i}. {target}")
             workload_names = ", ".join(w.name for w in benchmark_config.workloads)
             click.echo(f"Workloads:         {workload_names}")
             click.echo(
@@ -797,7 +814,9 @@ async def run_async(
 
                 # Brief pause between concurrency levels
                 if i < len(concurrency_levels):
-                    click.echo(f"\nWaiting {wait_between_runs} seconds before next run...")
+                    click.echo(
+                        f"\nWaiting {wait_between_runs} seconds before next run..."
+                    )
                     await asyncio.sleep(wait_between_runs)
 
             # Generate summary table
@@ -822,7 +841,7 @@ async def run_async(
             # Save results
             click.echo("\nSaving results...")
             json_filename = save_json_results(
-                workload_results, workload_path, benchmark_config, name, url
+                workload_results, workload_path, benchmark_config, name, ','.join(urls)
             )
             click.echo(f"✅ Raw results saved to: {json_filename}")
 
@@ -836,7 +855,13 @@ async def run_async(
             click.echo("PostgreSQL Workload Benchmark - Single Mode")
             click.echo("=" * 60)
             click.echo(f"Workload:    {workload_path}")
-            click.echo(f"Target:      {url.split('@')[-1] if '@' in url else url}")
+            targets = [url.split('@')[-1] if '@' in url else url for url in urls]
+            if len(targets) == 1:
+                click.echo(f"Target:      {targets[0]}")
+            else:
+                click.echo(f"Targets ({len(targets)} servers):")
+                for i, target in enumerate(targets, 1):
+                    click.echo(f"  {i}. {target}")
             click.echo(
                 f"Workloads:   {', '.join(w.name for w in benchmark_config.workloads)}"
             )
@@ -852,7 +877,7 @@ async def run_async(
                     avg_latency,
                     samples,
                 ) = await run_single_workload_benchmark(
-                    url, concurrency, benchmark_config.duration, workload, quiet=False
+                    urls, concurrency, benchmark_config.duration, workload, quiet=False
                 )
                 workload_results[workload_name] = {
                     "results": [
@@ -867,13 +892,13 @@ async def run_async(
 
             # Save results
             json_filename = save_json_results(
-                workload_results, workload_path, benchmark_config, name, url
+                workload_results, workload_path, benchmark_config, name, ','.join(urls)
             )
             click.echo(f"\n✅ Raw results saved to: {json_filename}")
 
     finally:
         # Run teardown queries
-        await run_teardown(url, benchmark_config.teardown_queries)
+        await run_teardown(urls, benchmark_config.teardown_queries)
 
 
 def plot_from_json(
@@ -1040,7 +1065,8 @@ def cli(ctx):
     "--url",
     "-u",
     required=True,
-    help="PostgreSQL connection URL (e.g., postgresql://user:pass@localhost/dbname)",
+    multiple=True,
+    help="PostgreSQL connection URL (can be specified multiple times for round-robin distribution)",
     envvar="DATABASE_URL",
 )
 @click.option(
@@ -1063,7 +1089,7 @@ def cli(ctx):
     default=20,
     help="Wait time in seconds between different concurrency runs (default: 20)",
 )
-def run(url: str, workload: str, name: Optional[str], wait_between_runs: int):
+def run(url: tuple[str, ...], workload: str, name: Optional[str], wait_between_runs: int):
     """Run workload benchmarks using an INI configuration file.
 
     The INI file should define workloads, setup/teardown queries, and parameters.
@@ -1091,8 +1117,11 @@ def run(url: str, workload: str, name: Optional[str], wait_between_runs: int):
     query=insert into t values (1)
     query=select count(*) from t
     """
+    # Convert tuple to list
+    urls = list(url)
+    
     try:
-        asyncio.run(run_async(url, workload, name, wait_between_runs))
+        asyncio.run(run_async(urls, workload, name, wait_between_runs))
     except KeyboardInterrupt:
         pass
     except Exception as e:
