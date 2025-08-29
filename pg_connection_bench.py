@@ -206,11 +206,11 @@ class ConnectionBenchmark:
 
 async def run_single_benchmark(
     url: str, concurrency: int, duration: int, quiet: bool = False
-) -> tuple[float, float]:
+) -> tuple[float, float, list[float]]:
     """Run a single benchmark at a specific concurrency level.
 
     Returns:
-        Tuple of (average connections per second, average latency in ms)
+        Tuple of (average connections per second, average latency in ms, latency samples)
     """
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     needed = concurrency * 4 + 1000
@@ -295,7 +295,9 @@ async def run_single_benchmark(
         if benchmark.stats.latencies
         else 0
     )
-    return avg_rate, avg_latency
+    # Sample latencies for visualization (up to 10000 samples)
+    latency_samples = benchmark.stats.latencies[:10000] if len(benchmark.stats.latencies) > 10000 else benchmark.stats.latencies.copy()
+    return avg_rate, avg_latency, latency_samples
 
 
 def generate_power_of_2_range(min_val: int, max_val: int) -> list[int]:
@@ -327,6 +329,7 @@ def save_json_results(
     concurrency_levels: list[int],
     connections_per_sec: list[float],
     avg_latencies: list[float],
+    latency_samples: list[list[float]],
     concurrency_min: int,
     concurrency_max: int,
     name: Optional[str] = None,
@@ -354,9 +357,18 @@ def save_json_results(
         "concurrency_min": concurrency_min,
         "concurrency_max": concurrency_max,
         "results": [
-            {"concurrency": c, "connections_per_sec": rate, "avg_latency_ms": latency}
-            for c, rate, latency in zip(
-                concurrency_levels, connections_per_sec, avg_latencies
+            {
+                "concurrency": c, 
+                "connections_per_sec": rate, 
+                "avg_latency_ms": latency,
+                "latency_percentiles": {
+                    "p50": float(sorted(samples)[len(samples)//2]) if samples else 0,
+                    "p95": float(sorted(samples)[int(len(samples)*0.95)]) if samples else 0,
+                    "p99": float(sorted(samples)[int(len(samples)*0.99)]) if samples else 0,
+                } if samples else {}
+            }
+            for c, rate, latency, samples in zip(
+                concurrency_levels, connections_per_sec, avg_latencies, latency_samples
             )
         ],
     }
@@ -371,6 +383,7 @@ def save_plots(
     concurrency_levels: list[int],
     connections_per_sec: list[float],
     avg_latencies: list[float],
+    latency_samples: list[list[float]],
     concurrency_min: int,
     concurrency_max: int,
     name: Optional[str] = None,
@@ -413,27 +426,46 @@ def save_plots(
             fontsize=9,
         )
 
-    # Plot average latency
-    ax2.plot(concurrency_levels, avg_latencies, "r-o", linewidth=2, markersize=8)
+    # Plot latency distribution as violin plot
+    # Prepare data for violin plot
+    positions = list(range(len(concurrency_levels)))
+    
+    # Create violin plot
+    parts = ax2.violinplot(
+        latency_samples,
+        positions=positions,
+        widths=0.7,
+        showmeans=True,
+        showextrema=True,
+        showmedians=True
+    )
+    
+    # Customize violin plot colors
+    for pc in parts['bodies']:
+        pc.set_facecolor('#ff7f0e')
+        pc.set_alpha(0.7)
+    
     ax2.set_xlabel("Concurrency (workers)", fontsize=12)
-    ax2.set_ylabel("Average Latency (ms)", fontsize=12)
-    ax2.set_title("Average Latency vs Concurrency", fontsize=14, fontweight="bold")
-    ax2.grid(True, alpha=0.3)
-    ax2.set_xscale("log", base=2)
-    ax2.set_xticks(concurrency_levels)
+    ax2.set_ylabel("Latency (ms)", fontsize=12)
+    ax2.set_title("Latency Distribution vs Concurrency", fontsize=14, fontweight="bold")
+    ax2.grid(True, alpha=0.3, axis='y')
+    ax2.set_xticks(positions)
     ax2.set_xticklabels([str(c) for c in concurrency_levels], rotation=45)
     ax2.set_ylim(bottom=0)
-
-    # Add value labels on the points
-    for x, y in zip(concurrency_levels, avg_latencies):
-        ax2.annotate(
-            f"{y:.1f}",
-            (x, y),
-            textcoords="offset points",
-            xytext=(0, 10),
-            ha="center",
-            fontsize=9,
-        )
+    
+    # Add median values as text annotations
+    for i, (pos, samples) in enumerate(zip(positions, latency_samples)):
+        if samples:
+            median = sorted(samples)[len(samples)//2]
+            ax2.annotate(
+                f"{median:.1f}",
+                (pos, median),
+                textcoords="offset points",
+                xytext=(0, -15),
+                ha="center",
+                fontsize=8,
+                color='darkred'
+            )
 
     title = "PostgreSQL Connection Benchmark Results"
     if name:
@@ -489,6 +521,7 @@ async def run_async(
         concurrency_levels = generate_power_of_2_range(concurrency_min, concurrency_max)
         connections_per_sec = []
         avg_latencies = []
+        latency_samples = []
 
         click.echo(f"Testing concurrency levels: {concurrency_levels}")
         click.echo()
@@ -498,11 +531,12 @@ async def run_async(
             click.echo(f"Run {i}/{len(concurrency_levels)}: Testing with {c} workers")
             click.echo(f"{'=' * 60}\n")
 
-            avg_rate, avg_latency = await run_single_benchmark(
+            avg_rate, avg_latency, samples = await run_single_benchmark(
                 url, c, duration, quiet=False
             )
             connections_per_sec.append(avg_rate)
             avg_latencies.append(avg_latency)
+            latency_samples.append(samples)
 
             # Brief pause between runs
             if i < len(concurrency_levels):
@@ -526,6 +560,7 @@ async def run_async(
             concurrency_levels,
             connections_per_sec,
             avg_latencies,
+            latency_samples,
             concurrency_min,
             concurrency_max,
             name,
@@ -540,6 +575,7 @@ async def run_async(
             concurrency_levels,
             connections_per_sec,
             avg_latencies,
+            latency_samples,
             concurrency_min,
             concurrency_max,
             name,

@@ -383,11 +383,11 @@ async def run_single_workload_benchmark(
     duration: int,
     workload: WorkloadConfig,
     quiet: bool,
-) -> tuple[str, float, float]:
+) -> tuple[str, float, float, list[float]]:
     """Run a single workload benchmark at a specific concurrency level.
 
     Returns:
-        Tuple of (workload_name, average queries per second, average latency in ms)
+        Tuple of (workload_name, average queries per second, average latency in ms, latency samples)
     """
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     needed = concurrency * 4 + 1000
@@ -473,7 +473,9 @@ async def run_single_workload_benchmark(
         if benchmark.stats.latencies
         else 0
     )
-    return workload.name, avg_rate, avg_latency
+    # Sample latencies for visualization (up to 10000 samples)
+    latency_samples = benchmark.stats.latencies[:10000] if len(benchmark.stats.latencies) > 10000 else benchmark.stats.latencies.copy()
+    return workload.name, avg_rate, avg_latency, latency_samples
 
 
 def generate_power_of_2_range(min_val: int, max_val: int) -> list[int]:
@@ -540,7 +542,24 @@ def save_json_results(
 
     # Organize results by workload
     for workload_name, data in workload_results.items():
-        results["workloads"][workload_name] = {"results": data["results"]}
+        # Add percentiles to each result if we have latency samples
+        enhanced_results = []
+        for r in data["results"]:
+            result = {
+                "concurrency": r["concurrency"],
+                "queries_per_sec": r["queries_per_sec"],
+                "avg_latency_ms": r["avg_latency_ms"]
+            }
+            if "latency_samples" in r and r["latency_samples"]:
+                samples = r["latency_samples"]
+                sorted_samples = sorted(samples)
+                result["latency_percentiles"] = {
+                    "p50": float(sorted_samples[len(sorted_samples)//2]),
+                    "p95": float(sorted_samples[int(len(sorted_samples)*0.95)]),
+                    "p99": float(sorted_samples[int(len(sorted_samples)*0.99)])
+                }
+            enhanced_results.append(result)
+        results["workloads"][workload_name] = {"results": enhanced_results}
 
     with open(json_filename, "w") as f:
         json.dump(results, f, indent=2)
@@ -593,6 +612,7 @@ def save_plots(
         concurrency_levels = [r["concurrency"] for r in results]
         queries_per_sec = [r["queries_per_sec"] for r in results]
         avg_latencies = [r["avg_latency_ms"] for r in results]
+        latency_samples = [r.get("latency_samples", []) for r in results]
 
         color = colors[idx % len(colors)]
 
@@ -626,35 +646,52 @@ def save_plots(
                 fontsize=8,
             )
 
-        # Plot average latency (right column)
+        # Plot latency distribution as violin plot (right column)
         ax2 = axes[idx, 1]
-        ax2.plot(
-            concurrency_levels,
-            avg_latencies,
-            color=color,
-            marker="o",
-            linewidth=2,
-            markersize=8,
-        )
+        
+        # Prepare data for violin plot
+        positions = list(range(len(concurrency_levels)))
+        
+        # Filter out empty sample lists
+        valid_samples = [s if s else [0] for s in latency_samples]
+        
+        # Create violin plot
+        if any(len(s) > 0 for s in valid_samples):
+            parts = ax2.violinplot(
+                valid_samples,
+                positions=positions,
+                widths=0.7,
+                showmeans=True,
+                showextrema=True,
+                showmedians=True
+            )
+            
+            # Customize violin plot colors
+            for pc in parts['bodies']:
+                pc.set_facecolor(color)
+                pc.set_alpha(0.7)
+        
         ax2.set_xlabel("Concurrency (workers)", fontsize=11)
-        ax2.set_ylabel("Average Latency (ms)", fontsize=11)
-        ax2.set_title(f"Latency: {workload_name}", fontsize=12, fontweight="bold")
-        ax2.grid(True, alpha=0.3)
-        ax2.set_xscale("log", base=2)
-        ax2.set_xticks(concurrency_levels)
+        ax2.set_ylabel("Latency (ms)", fontsize=11)
+        ax2.set_title(f"Latency Distribution: {workload_name}", fontsize=12, fontweight="bold")
+        ax2.grid(True, alpha=0.3, axis='y')
+        ax2.set_xticks(positions)
         ax2.set_xticklabels([str(c) for c in concurrency_levels], rotation=45)
         ax2.set_ylim(bottom=0)
-
-        # Add value labels
-        for x, y in zip(concurrency_levels, avg_latencies):
-            ax2.annotate(
-                f"{y:.1f}",
-                (x, y),
-                textcoords="offset points",
-                xytext=(0, 10),
-                ha="center",
-                fontsize=8,
-            )
+        
+        # Add median values as text annotations
+        for i, (pos, samples) in enumerate(zip(positions, valid_samples)):
+            if samples and len(samples) > 0:
+                median = sorted(samples)[len(samples)//2]
+                ax2.annotate(
+                    f"{median:.1f}",
+                    (pos, median),
+                    textcoords="offset points",
+                    xytext=(0, -15),
+                    ha="center",
+                    fontsize=8,
+                    color='darkred'
+                )
 
     title = "PostgreSQL Workload Benchmark Results"
     if name:
@@ -740,6 +777,7 @@ async def run_async(
                         workload_name,
                         avg_rate,
                         avg_latency,
+                        samples,
                     ) = await run_single_workload_benchmark(
                         url, c, benchmark_config.duration, workload, quiet=False
                     )
@@ -749,6 +787,7 @@ async def run_async(
                             "concurrency": c,
                             "queries_per_sec": avg_rate,
                             "avg_latency_ms": avg_latency,
+                            "latency_samples": samples,
                         }
                     )
 
@@ -811,6 +850,7 @@ async def run_async(
                     workload_name,
                     avg_rate,
                     avg_latency,
+                    samples,
                 ) = await run_single_workload_benchmark(
                     url, concurrency, benchmark_config.duration, workload, quiet=False
                 )
@@ -820,6 +860,7 @@ async def run_async(
                             "concurrency": concurrency,
                             "queries_per_sec": avg_rate,
                             "avg_latency_ms": avg_latency,
+                            "latency_samples": samples,
                         }
                     ]
                 }
