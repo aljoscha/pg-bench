@@ -2,6 +2,7 @@
 """PostgreSQL workload benchmarking tool with configurable INI workloads."""
 
 import asyncio
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -236,33 +237,36 @@ async def run_single_workload_benchmark(
     needed_fds = concurrency * 4 + 1000
     adjust_file_descriptor_limits(needed_fds, quiet)
 
-    if not quiet:
-        click.echo(f"\nBenchmarking Workload: {workload.name}")
-        click.echo("-" * 60)
-        click.echo(f"Queries in workload: {len(workload.queries)}")
-        click.echo(f"Concurrency:         {concurrency} workers")
-        click.echo(f"Duration:            {duration} seconds")
-        click.echo("-" * 60)
-        click.echo()
-
-    benchmark = WorkloadBenchmark(urls, concurrency, workload)
-
-    # Setup connections
-    await benchmark.setup_connections()
-
-    reporter = WorkloadReporter(benchmark.stats, benchmark.stats_lock, workload.name)
-
-    def shutdown_handler(sig):
-        click.echo("\n\nReceived interrupt signal, shutting down...")
-        benchmark.shutdown = True
-        reporter.stop()
-        loop = asyncio.get_event_loop()
-        for task in asyncio.all_tasks(loop):
-            task.cancel()
-
-    setup_signal_handlers(shutdown_handler)
-
+    benchmark = None
+    reporter = None
+    
     try:
+        if not quiet:
+            click.echo(f"\nBenchmarking Workload: {workload.name}")
+            click.echo("-" * 60)
+            click.echo(f"Queries in workload: {len(workload.queries)}")
+            click.echo(f"Concurrency:         {concurrency} workers")
+            click.echo(f"Duration:            {duration} seconds")
+            click.echo("-" * 60)
+            click.echo()
+
+        benchmark = WorkloadBenchmark(urls, concurrency, workload)
+
+        # Setup connections
+        await benchmark.setup_connections()
+
+        reporter = WorkloadReporter(benchmark.stats, benchmark.stats_lock, workload.name)
+
+        def shutdown_handler(sig):
+            click.echo("\n\nReceived interrupt signal, shutting down...")
+            benchmark.shutdown = True
+            reporter.stop()
+            loop = asyncio.get_event_loop()
+            for task in asyncio.all_tasks(loop):
+                task.cancel()
+
+        setup_signal_handlers(shutdown_handler)
+
         workers = [
             benchmark.worker(i, benchmark.connections[i]) for i in range(concurrency)
         ]
@@ -285,16 +289,16 @@ async def run_single_workload_benchmark(
         # Wait for tasks to finish
         await asyncio.gather(*worker_tasks, reporter_task, return_exceptions=True)
 
-    except asyncio.CancelledError:
-        pass
-    except KeyboardInterrupt:
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        # Suppress the exceptions - they're expected during shutdown
         pass
     finally:
-        benchmark.shutdown = True
-        await benchmark.cleanup_connections()
-        await asyncio.sleep(0.1)
-        if not quiet:
-            benchmark.print_summary()
+        if benchmark:
+            benchmark.shutdown = True
+            await benchmark.cleanup_connections()
+            await asyncio.sleep(0.1)
+            if not quiet:
+                benchmark.print_summary()
 
     # Calculate metrics
     duration = time.time() - benchmark.stats.start_time
@@ -714,4 +718,8 @@ def plot(json_files: tuple[str, ...], output_name: Optional[str]):
 
 
 if __name__ == "__main__":
-    cli()
+    try:
+        cli()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # Exit cleanly without showing the traceback
+        sys.exit(0)
