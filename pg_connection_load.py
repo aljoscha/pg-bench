@@ -2,13 +2,18 @@
 """PostgreSQL connection load testing tool."""
 
 import asyncio
-import resource
-import signal
 import sys
 from typing import Optional
 
 import asyncpg
 import click
+
+from pg_bench_common.database import format_target_list, setup_database_connection
+from pg_bench_common.system import (
+    adjust_file_descriptor_limits,
+    get_current_fd_limit,
+    setup_signal_handlers,
+)
 
 
 class ConnectionPool:
@@ -48,12 +53,11 @@ class ConnectionPool:
     async def _open_connection(self, index: int) -> asyncpg.Connection:
         """Open a single connection."""
         try:
-            conn = await asyncpg.connect(self.postgres_url)
-            await conn.execute("SELECT 1")
+            conn = await setup_database_connection(self.postgres_url)
             return conn
         except OSError as e:
             if e.errno == 24:  # EMFILE - Too many open files
-                limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+                limit = get_current_fd_limit()
                 raise Exception(
                     f"Connection {index + 1}: Too many open files (EMFILE). "
                     f"Current limit: {limit}. Try running with fewer connections "
@@ -96,47 +100,29 @@ class ConnectionPool:
 async def run_async(url: str, connections: int, duration: int) -> None:
     """Async implementation of the connection load tester."""
     # Adjust file descriptor limits if needed
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    needed = connections * 2 + 1000  # Extra buffer for other file descriptors
-
-    if soft < needed:
-        try:
-            new_limit = min(needed, hard)
-            resource.setrlimit(resource.RLIMIT_NOFILE, (new_limit, hard))
-            click.echo(f"Increased file descriptor limit from {soft} to {new_limit}")
-        except Exception as e:
-            click.echo(
-                f"Warning: Could not increase file descriptor limit: {e}", err=True
-            )
-            click.echo(
-                f"Current limit is {soft}, you may hit 'too many open files' errors",
-                err=True,
-            )
+    needed_fds = connections * 2 + 1000  # Extra buffer for other file descriptors
+    adjust_file_descriptor_limits(needed_fds, quiet=False)
 
     click.echo("PostgreSQL Connection Load Tester")
     click.echo("================================")
-    click.echo(f"Target: {url.split('@')[-1] if '@' in url else url}")
+    targets = format_target_list([url])
+    click.echo(f"Target: {targets[0]}")
     click.echo(f"Connections: {connections}")
     click.echo(f"Duration: {'infinite' if duration == 0 else f'{duration} seconds'}")
-    click.echo(
-        f"File descriptor limit: {resource.getrlimit(resource.RLIMIT_NOFILE)[0]}"
-    )
+    click.echo(f"File descriptor limit: {get_current_fd_limit()}")
     click.echo()
 
     pool = ConnectionPool(url, connections)
 
-    # Set up signal handlers for graceful shutdown
-    loop = asyncio.get_event_loop()
-
-    def signal_handler(sig):
+    def shutdown_handler(sig):
         click.echo("\n\nReceived interrupt signal")
         pool.shutdown = True
         # Cancel all running tasks
+        loop = asyncio.get_event_loop()
         for task in asyncio.all_tasks(loop):
             task.cancel()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda s=sig: signal_handler(s))
+    setup_signal_handlers(shutdown_handler)
 
     try:
         await pool.open_connections()

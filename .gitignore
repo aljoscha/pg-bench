@@ -1,4 +1,4 @@
 .claude
-__pycache__
+*__pycache__*
 pg_bench_*
 pg_workload_bench_*

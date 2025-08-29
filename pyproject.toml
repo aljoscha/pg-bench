@@ -56,4 +56,5 @@ include = [
     "pg_connection_bench.py",
     "pg_connection_load.py",
     "pg_workload_bench.py",
+    "pg_bench_common/",
 ]

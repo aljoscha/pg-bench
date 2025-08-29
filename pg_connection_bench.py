@@ -2,33 +2,33 @@
 """PostgreSQL connection throughput benchmarking tool."""
 
 import asyncio
-import json
-import math
-import resource
-import signal
 import time
-from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
 import asyncpg
 import click
-import matplotlib
 
-matplotlib.use("Agg")  # Use non-interactive backend
-import matplotlib.pyplot as plt
-
-
-@dataclass
-class BenchmarkStats:
-    """Statistics for the benchmark."""
-
-    total_connections: int = 0
-    failed_connections: int = 0
-    latencies: list[float] = field(default_factory=list)
-    start_time: float = field(default_factory=time.time)
-    last_report_time: float = field(default_factory=time.time)
-    last_report_connections: int = 0
+from pg_bench_common.database import format_target_list
+from pg_bench_common.plotting import (
+    create_throughput_latency_plots,
+    create_violin_plots,
+    enhance_results_with_percentiles,
+    load_json_results,
+    save_json_results,
+)
+from pg_bench_common.reporting import (
+    ConnectionReporter,
+    print_benchmark_summary,
+    print_summary_header,
+)
+from pg_bench_common.statistics import BenchmarkStats, print_latency_stats
+from pg_bench_common.system import (
+    adjust_file_descriptor_limits,
+    get_current_fd_limit,
+    setup_signal_handlers,
+)
+from pg_bench_common.utils import generate_power_of_2_range, sample_latencies
 
 
 class ConnectionBenchmark:
@@ -46,7 +46,7 @@ class ConnectionBenchmark:
         # Assign this worker to a specific URL using round-robin
         url_index = worker_id % len(self.postgres_urls)
         postgres_url = self.postgres_urls[url_index]
-        
+
         while not self.shutdown:
             try:
                 start = time.perf_counter()
@@ -58,14 +58,14 @@ class ConnectionBenchmark:
                 latency = (time.perf_counter() - start) * 1000
 
                 async with self.stats_lock:
-                    self.stats.total_connections += 1
+                    self.stats.total_operations += 1
                     self.stats.latencies.append(latency)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 async with self.stats_lock:
-                    self.stats.failed_connections += 1
+                    self.stats.failed_operations += 1
                 if not self.shutdown:
                     if isinstance(e, asyncpg.exceptions.TooManyConnectionsError):
                         await asyncio.sleep(0.1)
@@ -74,138 +74,22 @@ class ConnectionBenchmark:
                     else:
                         await asyncio.sleep(0.01)
 
-    async def reporter(self) -> None:
-        """Reports statistics every second."""
-        await asyncio.sleep(1)
-
-        while not self.shutdown:
-            async with self.stats_lock:
-                current_time = time.time()
-                time_delta = current_time - self.stats.last_report_time
-                conn_delta = (
-                    self.stats.total_connections - self.stats.last_report_connections
-                )
-
-                if time_delta > 0:
-                    rate = conn_delta / time_delta
-
-                    if self.stats.latencies:
-                        recent_latencies = self.stats.latencies[
-                            -min(1000, len(self.stats.latencies)) :
-                        ]
-                        avg_latency = sum(recent_latencies) / len(recent_latencies)
-                        min_latency = min(recent_latencies)
-                        max_latency = max(recent_latencies)
-
-                        click.echo(
-                            f"[{int(current_time - self.stats.start_time):>4}s] "
-                            f"Rate: {rate:>7.1f} conn/s | "
-                            f"Total: {self.stats.total_connections:>7} | "
-                            f"Failed: {self.stats.failed_connections:>5} | "
-                            f"Latency (ms): avg={avg_latency:>6.1f} "
-                            f"min={min_latency:>6.1f} max={max_latency:>6.1f}"
-                        )
-                    else:
-                        click.echo(
-                            f"[{int(current_time - self.stats.start_time):>4}s] "
-                            f"Rate: {rate:>7.1f} conn/s | "
-                            f"Total: {self.stats.total_connections:>7} | "
-                            f"Failed: {self.stats.failed_connections:>5}"
-                        )
-
-                self.stats.last_report_time = current_time
-                self.stats.last_report_connections = self.stats.total_connections
-
-            await asyncio.sleep(1)
-
-    def print_histogram(self) -> None:
-        """Print a histogram of connection latencies."""
-        if not self.stats.latencies:
-            return
-
-        sorted_latencies = sorted(self.stats.latencies)
-
-        percentiles = [50, 75, 90, 95, 99, 99.9]
-        click.echo("\nLatency Percentiles (ms):")
-        click.echo("-" * 40)
-        for p in percentiles:
-            idx = int(len(sorted_latencies) * p / 100)
-            idx = min(idx, len(sorted_latencies) - 1)
-            click.echo(f"  p{p:<5}: {sorted_latencies[idx]:>8.2f} ms")
-
-        click.echo("\nLatency Distribution:")
-        click.echo("-" * 60)
-
-        min_val = sorted_latencies[0]
-        max_val = sorted_latencies[-1]
-
-        if min_val == max_val:
-            click.echo(f"  All values: {min_val:.2f} ms")
-            return
-
-        num_buckets = min(20, len(sorted_latencies) // 10)
-        if num_buckets < 5:
-            num_buckets = 5
-
-        log_min = math.log10(max(min_val, 0.1))
-        log_max = math.log10(max_val)
-        log_step = (log_max - log_min) / num_buckets
-
-        buckets = []
-        for i in range(num_buckets):
-            lower = 10 ** (log_min + i * log_step)
-            upper = 10 ** (log_min + (i + 1) * log_step)
-            count = sum(1 for lat in sorted_latencies if lower <= lat < upper)
-            buckets.append((lower, upper, count))
-
-        max_count = max(b[2] for b in buckets)
-        bar_width = 40
-
-        for lower, upper, count in buckets:
-            bar_len = int((count / max_count) * bar_width) if max_count > 0 else 0
-            bar = "█" * bar_len
-            percentage = (count / len(sorted_latencies)) * 100
-            click.echo(
-                f"  {lower:>7.1f} - {upper:>7.1f} ms: {bar:<{bar_width}} "
-                f"{count:>6} ({percentage:>5.1f}%)"
-            )
-
     def print_summary(self) -> None:
         """Print final summary statistics."""
         duration = time.time() - self.stats.start_time
 
-        click.echo("\n" + "=" * 60)
-        click.echo("Benchmark Summary")
-        click.echo("=" * 60)
-
-        click.echo(f"Duration:             {duration:.1f} seconds")
-        click.echo(f"Concurrency:          {self.concurrency} workers")
-        click.echo(f"Total Connections:    {self.stats.total_connections}")
-        click.echo(f"Failed Connections:   {self.stats.failed_connections}")
-
-        if self.stats.total_connections > 0:
-            success_rate = (
-                (self.stats.total_connections - self.stats.failed_connections)
-                / self.stats.total_connections
-                * 100
-            )
-            click.echo(f"Success Rate:         {success_rate:.1f}%")
-
-        if duration > 0:
-            avg_rate = self.stats.total_connections / duration
-            click.echo(f"Average Rate:         {avg_rate:.1f} connections/second")
+        print_summary_header("Benchmark Summary")
+        print_benchmark_summary(
+            duration,
+            self.concurrency,
+            self.stats.total_operations,
+            self.stats.failed_operations,
+            self.stats.latencies,
+            "connections",
+        )
 
         if self.stats.latencies:
-            avg_latency = sum(self.stats.latencies) / len(self.stats.latencies)
-            min_latency = min(self.stats.latencies)
-            max_latency = max(self.stats.latencies)
-
-            click.echo("\nLatency Statistics:")
-            click.echo(f"  Average:            {avg_latency:.2f} ms")
-            click.echo(f"  Minimum:            {min_latency:.2f} ms")
-            click.echo(f"  Maximum:            {max_latency:.2f} ms")
-
-            self.print_histogram()
+            print_latency_stats(self.stats.latencies)
 
 
 async def run_single_benchmark(
@@ -216,27 +100,13 @@ async def run_single_benchmark(
     Returns:
         Tuple of (average connections per second, average latency in ms, latency samples)
     """
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    needed = concurrency * 4 + 1000
-
-    if soft < needed:
-        try:
-            new_limit = min(needed, hard)
-            resource.setrlimit(resource.RLIMIT_NOFILE, (new_limit, hard))
-            if not quiet:
-                click.echo(
-                    f"Increased file descriptor limit from {soft} to {new_limit}"
-                )
-        except Exception as e:
-            if not quiet:
-                click.echo(
-                    f"Warning: Could not increase file descriptor limit: {e}", err=True
-                )
+    needed_fds = concurrency * 4 + 1000
+    adjust_file_descriptor_limits(needed_fds, quiet)
 
     if not quiet:
         click.echo("PostgreSQL Connection Throughput Benchmark")
         click.echo("=" * 60)
-        targets = [url.split('@')[-1] if '@' in url else url for url in urls]
+        targets = format_target_list(urls)
         if len(targets) == 1:
             click.echo(f"Target:       {targets[0]}")
         else:
@@ -246,37 +116,37 @@ async def run_single_benchmark(
         click.echo(f"Concurrency:  {concurrency} workers")
         duration_str = "indefinite" if duration == 0 else f"{duration} seconds"
         click.echo(f"Duration:     {duration_str}")
-        click.echo(f"FD Limit:     {resource.getrlimit(resource.RLIMIT_NOFILE)[0]}")
+        click.echo(f"FD Limit:     {get_current_fd_limit()}")
         click.echo("=" * 60)
         click.echo()
 
     benchmark = ConnectionBenchmark(urls, concurrency)
+    reporter = ConnectionReporter(benchmark.stats, benchmark.stats_lock)
 
-    loop = asyncio.get_event_loop()
-
-    def signal_handler(sig):
+    def shutdown_handler(sig):
         click.echo("\n\nReceived interrupt signal, shutting down...")
         benchmark.shutdown = True
+        reporter.stop()
+        loop = asyncio.get_event_loop()
         for task in asyncio.all_tasks(loop):
             task.cancel()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda s=sig: signal_handler(s))
+    setup_signal_handlers(shutdown_handler)
 
     try:
         workers = [benchmark.worker(i) for i in range(concurrency)]
-        reporter = benchmark.reporter()
+        reporter_task = asyncio.create_task(reporter.run())
 
         if duration > 0:
-            # Create tasks for workers and reporter
+            # Create tasks for workers
             worker_tasks = [asyncio.create_task(w) for w in workers]
-            reporter_task = asyncio.create_task(reporter)
 
             # Wait for the duration
             await asyncio.sleep(duration)
 
             # Signal shutdown
             benchmark.shutdown = True
+            reporter.stop()
 
             # Cancel all tasks
             for task in worker_tasks + [reporter_task]:
@@ -285,7 +155,7 @@ async def run_single_benchmark(
             # Wait for tasks to finish cancellation
             await asyncio.gather(*worker_tasks, reporter_task, return_exceptions=True)
         else:
-            await asyncio.gather(*workers, reporter, return_exceptions=True)
+            await asyncio.gather(*workers, reporter_task, return_exceptions=True)
 
     except asyncio.CancelledError:
         pass
@@ -293,224 +163,21 @@ async def run_single_benchmark(
         pass
     finally:
         benchmark.shutdown = True
+        reporter.stop()
         await asyncio.sleep(0.1)
         if not quiet:
             benchmark.print_summary()
 
     # Calculate and return metrics after finally block
     duration = time.time() - benchmark.stats.start_time
-    avg_rate = benchmark.stats.total_connections / duration if duration > 0 else 0
+    avg_rate = benchmark.stats.total_operations / duration if duration > 0 else 0
     avg_latency = (
         sum(benchmark.stats.latencies) / len(benchmark.stats.latencies)
         if benchmark.stats.latencies
         else 0
     )
-    # Sample latencies for visualization (up to 10000 samples)
-    latency_samples = (
-        benchmark.stats.latencies[:10000]
-        if len(benchmark.stats.latencies) > 10000
-        else benchmark.stats.latencies.copy()
-    )
+    latency_samples = sample_latencies(benchmark.stats.latencies)
     return avg_rate, avg_latency, latency_samples
-
-
-def generate_power_of_2_range(min_val: int, max_val: int) -> list[int]:
-    """Generate a list of powers of 2 between min_val and max_val."""
-    values = []
-    current = 1
-
-    # Find the first power of 2 >= min_val
-    while current < min_val:
-        current *= 2
-
-    # Collect all powers of 2 up to max_val
-    while current <= max_val:
-        values.append(current)
-        current *= 2
-
-    # If min_val is not a power of 2, include it
-    if min_val not in values and min_val > 0:
-        values.insert(0, min_val)
-
-    # If max_val is not a power of 2, include it
-    if max_val not in values and max_val > min_val:
-        values.append(max_val)
-
-    return sorted(values)
-
-
-def save_json_results(
-    concurrency_levels: list[int],
-    connections_per_sec: list[float],
-    avg_latencies: list[float],
-    latency_samples: list[list[float]],
-    concurrency_min: int,
-    concurrency_max: int,
-    name: Optional[str] = None,
-    url: Optional[str] = None,
-    duration: Optional[int] = None,
-) -> str:
-    """Save benchmark results as JSON.
-
-    Returns:
-        JSON filename
-    """
-    timestamp = datetime.now()
-    timestamp_str = timestamp.strftime("%Y%m%d_%H%M%S")
-    base_name = f"pg_bench_{timestamp_str}"
-    if name:
-        base_name += f"_{name}"
-    base_name += f"_c{concurrency_min}-{concurrency_max}"
-    json_filename = f"{base_name}.json"
-
-    results = {
-        "timestamp": timestamp.isoformat(),
-        "name": name,
-        "url": url.split("@")[-1] if url and "@" in url else url,
-        "duration_per_run": duration,
-        "concurrency_min": concurrency_min,
-        "concurrency_max": concurrency_max,
-        "results": [
-            {
-                "concurrency": c,
-                "connections_per_sec": rate,
-                "avg_latency_ms": latency,
-                "latency_percentiles": {
-                    "p50": float(sorted(samples)[len(samples) // 2]) if samples else 0,
-                    "p95": float(sorted(samples)[int(len(samples) * 0.95)])
-                    if samples
-                    else 0,
-                    "p99": float(sorted(samples)[int(len(samples) * 0.99)])
-                    if samples
-                    else 0,
-                }
-                if samples
-                else {},
-            }
-            for c, rate, latency, samples in zip(
-                concurrency_levels, connections_per_sec, avg_latencies, latency_samples
-            )
-        ],
-    }
-
-    with open(json_filename, "w") as f:
-        json.dump(results, f, indent=2)
-
-    return json_filename
-
-
-def save_plots(
-    concurrency_levels: list[int],
-    connections_per_sec: list[float],
-    avg_latencies: list[float],
-    latency_samples: list[list[float]],
-    concurrency_min: int,
-    concurrency_max: int,
-    name: Optional[str] = None,
-) -> tuple[str, str]:
-    """Generate and save performance plots.
-
-    Returns:
-        Tuple of (connections/sec plot filename, latency plot filename)
-    """
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_name = f"pg_bench_{timestamp}"
-    if name:
-        base_name += f"_{name}"
-    base_name += f"_c{concurrency_min}-{concurrency_max}"
-
-    # Create figure with two subplots
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-
-    # Plot connections per second
-    ax1.plot(concurrency_levels, connections_per_sec, "b-o", linewidth=2, markersize=8)
-    ax1.set_xlabel("Concurrency (workers)", fontsize=12)
-    ax1.set_ylabel("Connections per Second", fontsize=12)
-    ax1.set_title(
-        "Connection Throughput vs Concurrency", fontsize=14, fontweight="bold"
-    )
-    ax1.grid(True, alpha=0.3)
-    ax1.set_xscale("log", base=2)
-    ax1.set_xticks(concurrency_levels)
-    ax1.set_xticklabels([str(c) for c in concurrency_levels], rotation=45)
-    ax1.set_ylim(bottom=0)
-
-    # Add value labels on the points
-    for x, y in zip(concurrency_levels, connections_per_sec):
-        ax1.annotate(
-            f"{y:.0f}",
-            (x, y),
-            textcoords="offset points",
-            xytext=(0, 10),
-            ha="center",
-            fontsize=9,
-        )
-
-    # Plot latency distribution as violin plot
-    # Prepare data for violin plot
-    positions = list(range(len(concurrency_levels)))
-
-    # Create violin plot
-    parts = ax2.violinplot(
-        latency_samples,
-        positions=positions,
-        widths=0.7,
-        showmeans=True,
-        showextrema=True,
-        showmedians=True,
-    )
-
-    # Customize violin plot colors
-    for pc in parts["bodies"]:
-        pc.set_facecolor("#ff7f0e")
-        pc.set_alpha(0.7)
-
-    ax2.set_xlabel("Concurrency (workers)", fontsize=12)
-    ax2.set_ylabel("Latency (ms)", fontsize=12)
-    ax2.set_title("Latency Distribution vs Concurrency", fontsize=14, fontweight="bold")
-    ax2.grid(True, alpha=0.3, axis="y")
-    ax2.set_xticks(positions)
-    ax2.set_xticklabels([str(c) for c in concurrency_levels], rotation=45)
-    ax2.set_ylim(bottom=0)
-
-    # Add median values as text annotations
-    for i, (pos, samples) in enumerate(zip(positions, latency_samples)):
-        if samples:
-            median = sorted(samples)[len(samples) // 2]
-            ax2.annotate(
-                f"{median:.1f}",
-                (pos, median),
-                textcoords="offset points",
-                xytext=(0, -15),
-                ha="center",
-                fontsize=8,
-                color="darkred",
-            )
-
-    title = "PostgreSQL Connection Benchmark Results"
-    if name:
-        title += f": {name}"
-    title += f"\n{timestamp}"
-
-    plt.suptitle(
-        title,
-        fontsize=16,
-        fontweight="bold",
-    )
-    plt.tight_layout()
-
-    # Try to save as SVG first, fall back to PNG
-    try:
-        svg_filename = f"{base_name}.svg"
-        plt.savefig(svg_filename, format="svg", dpi=150, bbox_inches="tight")
-        plt.close()
-        return svg_filename, svg_filename
-    except Exception as e:
-        click.echo(f"Warning: Could not save as SVG ({e}), saving as PNG instead")
-        png_filename = f"{base_name}.png"
-        plt.savefig(png_filename, format="png", dpi=150, bbox_inches="tight")
-        plt.close()
-        return png_filename, png_filename
 
 
 async def run_async(
@@ -531,7 +198,7 @@ async def run_async(
         # Range mode
         click.echo("PostgreSQL Connection Throughput Benchmark - Range Mode")
         click.echo("=" * 60)
-        targets = [url.split('@')[-1] if '@' in url else url for url in urls]
+        targets = format_target_list(urls)
         if len(targets) == 1:
             click.echo(f"Target:            {targets[0]}")
         else:
@@ -582,30 +249,59 @@ async def run_async(
 
         # Save JSON results
         click.echo("\nSaving raw results...")
+        results_data = {
+            "concurrency_min": concurrency_min,
+            "concurrency_max": concurrency_max,
+            "duration_per_run": duration,
+            "results": enhance_results_with_percentiles(
+                [
+                    {
+                        "concurrency": c,
+                        "connections_per_sec": rate,
+                        "avg_latency_ms": latency,
+                        "latency_samples": samples,
+                    }
+                    for c, rate, latency, samples in zip(
+                        concurrency_levels,
+                        connections_per_sec,
+                        avg_latencies,
+                        latency_samples,
+                    )
+                ]
+            ),
+        }
         json_filename = save_json_results(
-            concurrency_levels,
-            connections_per_sec,
-            avg_latencies,
-            latency_samples,
+            results_data,
+            "pg_bench",
+            name,
+            ",".join(urls),
             concurrency_min,
             concurrency_max,
-            name,
-            ','.join(urls),
-            duration,
         )
         click.echo(f"✅ Raw results saved to: {json_filename}")
 
         # Generate and save plots
         click.echo("\nGenerating performance plots...")
-        plot_filename, _ = save_plots(
-            concurrency_levels,
-            connections_per_sec,
-            avg_latencies,
-            latency_samples,
-            concurrency_min,
-            concurrency_max,
-            name,
-        )
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_name = f"pg_bench_{timestamp}"
+        if name:
+            base_name += f"_{name}"
+        base_name += f"_c{concurrency_min}-{concurrency_max}"
+
+        dataset = {
+            "label": name or "PostgreSQL Connection Benchmark",
+            "concurrency_levels": concurrency_levels,
+            "throughput": connections_per_sec,
+            "avg_latencies": avg_latencies,
+            "latency_samples": latency_samples,
+        }
+
+        title = "PostgreSQL Connection Benchmark Results"
+        if name:
+            title += f": {name}"
+        title += f"\n{timestamp}"
+
+        plot_filename = create_violin_plots(title, [dataset], base_name)
         click.echo(f"✅ Performance plots saved to: {plot_filename}")
 
     else:
@@ -620,48 +316,15 @@ def plot_from_json(
     output_name: Optional[str] = None,
 ) -> None:
     """Load multiple JSON result files and create combined plots."""
-    all_data = []
-
-    # Load all JSON files
-    for json_file in json_files:
-        try:
-            with open(json_file) as f:
-                data = json.load(f)
-                all_data.append(data)
-                name = data.get("name", "unnamed")
-                timestamp = data.get("timestamp", "no timestamp")
-                click.echo(f"Loaded: {json_file} ({name} - {timestamp})")
-        except Exception as e:
-            click.echo(f"Error loading {json_file}: {e}", err=True)
-            continue
-
-    if not all_data:
-        click.echo("No valid JSON files loaded.", err=True)
+    try:
+        all_data = load_json_results(json_files)
+    except ValueError as e:
+        click.echo(str(e), err=True)
         return
 
-    # Create figure with two subplots
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
-
-    # Colors for different datasets
-    colors = [
-        "#1f77b4",
-        "#ff7f0e",
-        "#2ca02c",
-        "#d62728",
-        "#9467bd",
-        "#8c564b",
-        "#e377c2",
-        "#7f7f7f",
-        "#bcbd22",
-        "#17becf",
-    ]
-    markers = ["o", "s", "^", "v", "D", "p", "*", "h", "X", "+"]
-
-    # Plot each dataset
+    # Prepare datasets for plotting
+    datasets = []
     for idx, data in enumerate(all_data):
-        color = colors[idx % len(colors)]
-        marker = markers[idx % len(markers)]
-
         results = data["results"]
         concurrency_levels = [r["concurrency"] for r in results]
         connections_per_sec = [r["connections_per_sec"] for r in results]
@@ -672,76 +335,30 @@ def plot_from_json(
             timestamp = datetime.fromisoformat(data["timestamp"])
             label += f" ({timestamp.strftime('%Y-%m-%d %H:%M')})"
 
-        # Plot connections per second
-        ax1.plot(
-            concurrency_levels,
-            connections_per_sec,
-            color=color,
-            marker=marker,
-            linewidth=2,
-            markersize=8,
-            label=label,
-            alpha=0.8,
+        datasets.append(
+            {
+                "label": label,
+                "concurrency_levels": concurrency_levels,
+                "throughput": connections_per_sec,
+                "avg_latencies": avg_latencies,
+            }
         )
 
-        # Plot average latency
-        ax2.plot(
-            concurrency_levels,
-            avg_latencies,
-            color=color,
-            marker=marker,
-            linewidth=2,
-            markersize=8,
-            label=label,
-            alpha=0.8,
-        )
-
-    # Configure connections/sec plot
-    ax1.set_xlabel("Concurrency (workers)", fontsize=12)
-    ax1.set_ylabel("Connections per Second", fontsize=12)
-    ax1.set_title(
-        "Connection Throughput vs Concurrency", fontsize=14, fontweight="bold"
-    )
-    ax1.grid(True, alpha=0.3)
-    ax1.set_xscale("log", base=2)
-    ax1.set_ylim(bottom=0)
-    ax1.legend(loc="best", fontsize=9)
-
-    # Configure latency plot
-    ax2.set_xlabel("Concurrency (workers)", fontsize=12)
-    ax2.set_ylabel("Average Latency (ms)", fontsize=12)
-    ax2.set_title("Average Latency vs Concurrency", fontsize=14, fontweight="bold")
-    ax2.grid(True, alpha=0.3)
-    ax2.set_xscale("log", base=2)
-    ax2.set_ylim(bottom=0)
-    ax2.legend(loc="best", fontsize=9)
-
-    # Add overall title
+    # Create comparison plot
     title = "PostgreSQL Connection Benchmark Comparison"
     if output_name:
         title += f": {output_name}"
     title += f"\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
-    plt.suptitle(title, fontsize=16, fontweight="bold")
-    plt.tight_layout()
-
-    # Save the plot
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_name = f"pg_bench_comparison_{timestamp}"
     if output_name:
         base_name += f"_{output_name}"
 
-    try:
-        svg_filename = f"{base_name}.svg"
-        plt.savefig(svg_filename, format="svg", dpi=150, bbox_inches="tight")
-        plt.close()
-        click.echo(f"\n✅ Comparison plot saved to: {svg_filename}")
-    except Exception as e:
-        click.echo(f"Warning: Could not save as SVG ({e}), saving as PNG instead")
-        png_filename = f"{base_name}.png"
-        plt.savefig(png_filename, format="png", dpi=150, bbox_inches="tight")
-        plt.close()
-        click.echo(f"\n✅ Comparison plot saved to: {png_filename}")
+    plot_filename = create_throughput_latency_plots(
+        title, datasets, base_name, "Connections per Second", "Average Latency (ms)"
+    )
+    click.echo(f"\n✅ Comparison plot saved to: {plot_filename}")
 
 
 @click.group(invoke_without_command=True)
@@ -820,7 +437,7 @@ def run(
     2. Range mode: Use --concurrency-min and --concurrency-max to test multiple levels
 
     In range mode, tests powers of 2 between min and max values.
-    
+
     When multiple URLs are provided, connections are distributed round-robin across servers.
     """
     # Validate arguments
@@ -850,7 +467,7 @@ def run(
 
     # Convert tuple to list
     urls = list(url)
-    
+
     try:
         asyncio.run(
             run_async(

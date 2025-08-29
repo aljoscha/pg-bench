@@ -2,11 +2,6 @@
 """PostgreSQL workload benchmarking tool with configurable INI workloads."""
 
 import asyncio
-import json
-import math
-import re
-import resource
-import signal
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -15,22 +10,31 @@ from typing import Optional
 
 import asyncpg
 import click
-import matplotlib
 
-matplotlib.use("Agg")  # Use non-interactive backend
-import matplotlib.pyplot as plt
-
-
-@dataclass
-class WorkloadStats:
-    """Statistics for a workload benchmark."""
-
-    total_queries: int = 0
-    failed_queries: int = 0
-    latencies: list[float] = field(default_factory=list)
-    start_time: float = field(default_factory=time.time)
-    last_report_time: float = field(default_factory=time.time)
-    last_report_queries: int = 0
+from pg_bench_common.database import (
+    format_target_list,
+    run_queries_on_connection,
+    setup_database_connection,
+)
+from pg_bench_common.plotting import (
+    create_throughput_latency_plots,
+    create_violin_plots,
+    enhance_results_with_percentiles,
+    load_json_results,
+    save_json_results,
+)
+from pg_bench_common.reporting import (
+    WorkloadReporter,
+    print_benchmark_summary,
+    print_summary_header,
+)
+from pg_bench_common.statistics import BenchmarkStats, print_latency_stats
+from pg_bench_common.system import adjust_file_descriptor_limits, setup_signal_handlers
+from pg_bench_common.utils import (
+    generate_power_of_2_range,
+    parse_duration,
+    sample_latencies,
+)
 
 
 @dataclass
@@ -53,23 +57,6 @@ class BenchmarkConfig:
     setup_queries: list[str] = field(default_factory=list)
     teardown_queries: list[str] = field(default_factory=list)
     workloads: list[WorkloadConfig] = field(default_factory=list)
-
-
-def parse_duration(duration_str: str) -> int:
-    """Parse duration string like '5m', '30s', '1h' into seconds."""
-    duration_str = duration_str.strip().lower()
-
-    # Check for time units
-    match = re.match(r"^(\d+)([smh]?)$", duration_str)
-    if not match:
-        raise ValueError(f"Invalid duration format: {duration_str}")
-
-    value = int(match.group(1))
-    unit = match.group(2) or "s"  # Default to seconds
-
-    multipliers = {"s": 1, "m": 60, "h": 3600}
-
-    return value * multipliers[unit]
 
 
 def parse_ini_config(config_path: Path) -> BenchmarkConfig:
@@ -159,12 +146,14 @@ def parse_ini_config(config_path: Path) -> BenchmarkConfig:
 class WorkloadBenchmark:
     """Benchmarks PostgreSQL workload throughput."""
 
-    def __init__(self, postgres_urls: list[str], concurrency: int, workload: WorkloadConfig):
+    def __init__(
+        self, postgres_urls: list[str], concurrency: int, workload: WorkloadConfig
+    ):
         self.postgres_urls = postgres_urls
         self.concurrency = concurrency
         self.workload = workload
         self.shutdown = False
-        self.stats = WorkloadStats()
+        self.stats = BenchmarkStats()
         self.stats_lock = asyncio.Lock()
         self.connections: list[asyncpg.Connection] = []
 
@@ -175,7 +164,7 @@ class WorkloadBenchmark:
                 # Round-robin distribution across URLs
                 url_index = i % len(self.postgres_urls)
                 postgres_url = self.postgres_urls[url_index]
-                conn = await asyncpg.connect(postgres_url, timeout=30)
+                conn = await setup_database_connection(postgres_url)
                 self.connections.append(conn)
             except Exception as e:
                 click.echo(f"Failed to create connection {i + 1}: {e}", err=True)
@@ -203,185 +192,33 @@ class WorkloadBenchmark:
                 latency = (time.perf_counter() - start) * 1000
 
                 async with self.stats_lock:
-                    self.stats.total_queries += len(self.workload.queries)
+                    self.stats.total_operations += len(self.workload.queries)
                     self.stats.latencies.append(latency)
 
             except asyncio.CancelledError:
                 break
             except Exception:
                 async with self.stats_lock:
-                    self.stats.failed_queries += len(self.workload.queries)
+                    self.stats.failed_operations += len(self.workload.queries)
                 if not self.shutdown:
                     await asyncio.sleep(0.01)
-
-    async def reporter(self) -> None:
-        """Reports statistics every second."""
-        await asyncio.sleep(1)
-
-        while not self.shutdown:
-            async with self.stats_lock:
-                current_time = time.time()
-                time_delta = current_time - self.stats.last_report_time
-                query_delta = self.stats.total_queries - self.stats.last_report_queries
-
-                if time_delta > 0:
-                    rate = query_delta / time_delta
-
-                    if self.stats.latencies:
-                        recent_latencies = self.stats.latencies[
-                            -min(1000, len(self.stats.latencies)) :
-                        ]
-                        avg_latency = sum(recent_latencies) / len(recent_latencies)
-                        min_latency = min(recent_latencies)
-                        max_latency = max(recent_latencies)
-
-                        click.echo(
-                            f"[{int(current_time - self.stats.start_time):>4}s] "
-                            f"Workload: {self.workload.name:<20} | "
-                            f"Rate: {rate:>7.1f} q/s | "
-                            f"Total: {self.stats.total_queries:>7} | "
-                            f"Failed: {self.stats.failed_queries:>5} | "
-                            f"Latency (ms): avg={avg_latency:>6.1f} "
-                            f"min={min_latency:>6.1f} max={max_latency:>6.1f}"
-                        )
-                    else:
-                        click.echo(
-                            f"[{int(current_time - self.stats.start_time):>4}s] "
-                            f"Workload: {self.workload.name:<20} | "
-                            f"Rate: {rate:>7.1f} q/s | "
-                            f"Total: {self.stats.total_queries:>7} | "
-                            f"Failed: {self.stats.failed_queries:>5}"
-                        )
-
-                self.stats.last_report_time = current_time
-                self.stats.last_report_queries = self.stats.total_queries
-
-            await asyncio.sleep(1)
-
-    def print_histogram(self) -> None:
-        """Print a histogram of workload latencies."""
-        if not self.stats.latencies:
-            return
-
-        sorted_latencies = sorted(self.stats.latencies)
-
-        percentiles = [50, 75, 90, 95, 99, 99.9]
-        click.echo("\nLatency Percentiles (ms):")
-        click.echo("-" * 40)
-        for p in percentiles:
-            idx = int(len(sorted_latencies) * p / 100)
-            idx = min(idx, len(sorted_latencies) - 1)
-            click.echo(f"  p{p:<5}: {sorted_latencies[idx]:>8.2f} ms")
-
-        click.echo("\nLatency Distribution:")
-        click.echo("-" * 60)
-
-        min_val = sorted_latencies[0]
-        max_val = sorted_latencies[-1]
-
-        if min_val == max_val:
-            click.echo(f"  All values: {min_val:.2f} ms")
-            return
-
-        num_buckets = min(20, len(sorted_latencies) // 10)
-        if num_buckets < 5:
-            num_buckets = 5
-
-        log_min = math.log10(max(min_val, 0.1))
-        log_max = math.log10(max_val)
-        log_step = (log_max - log_min) / num_buckets
-
-        buckets = []
-        for i in range(num_buckets):
-            lower = 10 ** (log_min + i * log_step)
-            upper = 10 ** (log_min + (i + 1) * log_step)
-            count = sum(1 for lat in sorted_latencies if lower <= lat < upper)
-            buckets.append((lower, upper, count))
-
-        max_count = max(b[2] for b in buckets)
-        bar_width = 40
-
-        for lower, upper, count in buckets:
-            bar_len = int((count / max_count) * bar_width) if max_count > 0 else 0
-            bar = "█" * bar_len
-            percentage = (count / len(sorted_latencies)) * 100
-            click.echo(
-                f"  {lower:>7.1f} - {upper:>7.1f} ms: {bar:<{bar_width}} "
-                f"{count:>6} ({percentage:>5.1f}%)"
-            )
 
     def print_summary(self) -> None:
         """Print final summary statistics."""
         duration = time.time() - self.stats.start_time
 
-        click.echo("\n" + "=" * 60)
-        click.echo(f"Workload Summary: {self.workload.name}")
-        click.echo("=" * 60)
-
-        click.echo(f"Duration:             {duration:.1f} seconds")
-        click.echo(f"Concurrency:          {self.concurrency} workers")
-        click.echo(f"Total Queries:        {self.stats.total_queries}")
-        click.echo(f"Failed Queries:       {self.stats.failed_queries}")
-
-        if self.stats.total_queries > 0:
-            success_rate = (
-                (self.stats.total_queries - self.stats.failed_queries)
-                / self.stats.total_queries
-                * 100
-            )
-            click.echo(f"Success Rate:         {success_rate:.1f}%")
-
-        if duration > 0:
-            avg_rate = self.stats.total_queries / duration
-            click.echo(f"Average Rate:         {avg_rate:.1f} queries/second")
+        print_summary_header(f"Workload Summary: {self.workload.name}")
+        print_benchmark_summary(
+            duration,
+            self.concurrency,
+            self.stats.total_operations,
+            self.stats.failed_operations,
+            self.stats.latencies,
+            "queries",
+        )
 
         if self.stats.latencies:
-            avg_latency = sum(self.stats.latencies) / len(self.stats.latencies)
-            min_latency = min(self.stats.latencies)
-            max_latency = max(self.stats.latencies)
-
-            click.echo("\nLatency Statistics:")
-            click.echo(f"  Average:            {avg_latency:.2f} ms")
-            click.echo(f"  Minimum:            {min_latency:.2f} ms")
-            click.echo(f"  Maximum:            {max_latency:.2f} ms")
-
-            self.print_histogram()
-
-
-async def run_setup(postgres_urls: list[str], setup_queries: list[str]) -> None:
-    """Run setup queries before benchmark on the first server."""
-    if not setup_queries:
-        return
-
-    click.echo("\nRunning setup queries...")
-    # Only run on the first server since they share the same data store
-    postgres_url = postgres_urls[0]
-    conn = await asyncpg.connect(postgres_url, timeout=30)
-    try:
-        for query in setup_queries:
-            click.echo(f"  Executing: {query[:50]}...")
-            await conn.execute(query)
-        click.echo("Setup completed successfully.\n")
-    finally:
-        await conn.close()
-
-
-async def run_teardown(postgres_urls: list[str], teardown_queries: list[str]) -> None:
-    """Run teardown queries after benchmark on the first server."""
-    if not teardown_queries:
-        return
-
-    click.echo("\nRunning teardown queries...")
-    # Only run on the first server since they share the same data store
-    postgres_url = postgres_urls[0]
-    conn = await asyncpg.connect(postgres_url, timeout=30)
-    try:
-        for query in teardown_queries:
-            click.echo(f"  Executing: {query[:50]}...")
-            await conn.execute(query)
-        click.echo("Teardown completed successfully.")
-    finally:
-        await conn.close()
+            print_latency_stats(self.stats.latencies)
 
 
 async def run_single_workload_benchmark(
@@ -396,22 +233,8 @@ async def run_single_workload_benchmark(
     Returns:
         Tuple of (workload_name, average queries per second, average latency in ms, latency samples)
     """
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    needed = concurrency * 4 + 1000
-
-    if soft < needed:
-        try:
-            new_limit = min(needed, hard)
-            resource.setrlimit(resource.RLIMIT_NOFILE, (new_limit, hard))
-            if not quiet:
-                click.echo(
-                    f"Increased file descriptor limit from {soft} to {new_limit}"
-                )
-        except Exception as e:
-            if not quiet:
-                click.echo(
-                    f"Warning: Could not increase file descriptor limit: {e}", err=True
-                )
+    needed_fds = concurrency * 4 + 1000
+    adjust_file_descriptor_limits(needed_fds, quiet)
 
     if not quiet:
         click.echo(f"\nBenchmarking Workload: {workload.name}")
@@ -427,32 +250,33 @@ async def run_single_workload_benchmark(
     # Setup connections
     await benchmark.setup_connections()
 
-    loop = asyncio.get_event_loop()
+    reporter = WorkloadReporter(benchmark.stats, benchmark.stats_lock, workload.name)
 
-    def signal_handler(sig):
+    def shutdown_handler(sig):
         click.echo("\n\nReceived interrupt signal, shutting down...")
         benchmark.shutdown = True
+        reporter.stop()
+        loop = asyncio.get_event_loop()
         for task in asyncio.all_tasks(loop):
             task.cancel()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda s=sig: signal_handler(s))
+    setup_signal_handlers(shutdown_handler)
 
     try:
         workers = [
             benchmark.worker(i, benchmark.connections[i]) for i in range(concurrency)
         ]
-        reporter = benchmark.reporter()
+        reporter_task = asyncio.create_task(reporter.run())
 
         # Create tasks
         worker_tasks = [asyncio.create_task(w) for w in workers]
-        reporter_task = asyncio.create_task(reporter)
 
         # Wait for the duration
         await asyncio.sleep(duration)
 
         # Signal shutdown
         benchmark.shutdown = True
+        reporter.stop()
 
         # Cancel all tasks
         for task in worker_tasks + [reporter_task]:
@@ -474,258 +298,14 @@ async def run_single_workload_benchmark(
 
     # Calculate metrics
     duration = time.time() - benchmark.stats.start_time
-    avg_rate = benchmark.stats.total_queries / duration if duration > 0 else 0
+    avg_rate = benchmark.stats.total_operations / duration if duration > 0 else 0
     avg_latency = (
         sum(benchmark.stats.latencies) / len(benchmark.stats.latencies)
         if benchmark.stats.latencies
         else 0
     )
-    # Sample latencies for visualization (up to 10000 samples)
-    latency_samples = (
-        benchmark.stats.latencies[:10000]
-        if len(benchmark.stats.latencies) > 10000
-        else benchmark.stats.latencies.copy()
-    )
+    latency_samples = sample_latencies(benchmark.stats.latencies)
     return workload.name, avg_rate, avg_latency, latency_samples
-
-
-def generate_power_of_2_range(min_val: int, max_val: int) -> list[int]:
-    """Generate a list of powers of 2 between min_val and max_val."""
-    values = []
-    current = 1
-
-    # Find the first power of 2 >= min_val
-    while current < min_val:
-        current *= 2
-
-    # Collect all powers of 2 up to max_val
-    while current <= max_val:
-        values.append(current)
-        current *= 2
-
-    # Include endpoints if not powers of 2
-    if min_val not in values and min_val > 0:
-        values.insert(0, min_val)
-
-    if max_val not in values and max_val > min_val:
-        values.append(max_val)
-
-    return sorted(values)
-
-
-def save_json_results(
-    workload_results: dict,
-    workload_path: str,
-    benchmark_config: BenchmarkConfig,
-    name: Optional[str] = None,
-    url: Optional[str] = None,
-) -> str:
-    """Save benchmark results as JSON.
-
-    Returns:
-        JSON filename
-    """
-    timestamp = datetime.now()
-    timestamp_str = timestamp.strftime("%Y%m%d_%H%M%S")
-    base_name = f"pg_workload_bench_{timestamp_str}"
-    if name:
-        base_name += f"_{name}"
-    if benchmark_config.concurrency_min and benchmark_config.concurrency_max:
-        base_name += (
-            f"_c{benchmark_config.concurrency_min}-{benchmark_config.concurrency_max}"
-        )
-    json_filename = f"{base_name}.json"
-
-    results = {
-        "timestamp": timestamp.isoformat(),
-        "name": name,
-        "workload_file": workload_path,
-        "url": url.split("@")[-1] if url and "@" in url else url,
-        "duration_per_run": benchmark_config.duration,
-        "workloads": {},
-    }
-
-    if benchmark_config.concurrency_min and benchmark_config.concurrency_max:
-        results["concurrency_min"] = benchmark_config.concurrency_min
-        results["concurrency_max"] = benchmark_config.concurrency_max
-    elif benchmark_config.concurrency:
-        results["concurrency"] = benchmark_config.concurrency
-
-    # Organize results by workload
-    for workload_name, data in workload_results.items():
-        # Add percentiles to each result if we have latency samples
-        enhanced_results = []
-        for r in data["results"]:
-            result = {
-                "concurrency": r["concurrency"],
-                "queries_per_sec": r["queries_per_sec"],
-                "avg_latency_ms": r["avg_latency_ms"],
-            }
-            if "latency_samples" in r and r["latency_samples"]:
-                samples = r["latency_samples"]
-                sorted_samples = sorted(samples)
-                result["latency_percentiles"] = {
-                    "p50": float(sorted_samples[len(sorted_samples) // 2]),
-                    "p95": float(sorted_samples[int(len(sorted_samples) * 0.95)]),
-                    "p99": float(sorted_samples[int(len(sorted_samples) * 0.99)]),
-                }
-            enhanced_results.append(result)
-        results["workloads"][workload_name] = {"results": enhanced_results}
-
-    with open(json_filename, "w") as f:
-        json.dump(results, f, indent=2)
-
-    return json_filename
-
-
-def save_plots(
-    workload_results: dict,
-    benchmark_config: BenchmarkConfig,
-    name: Optional[str] = None,
-) -> str:
-    """Generate and save performance plots for all workloads.
-
-    Returns:
-        Plot filename
-    """
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_name = f"pg_workload_bench_{timestamp}"
-    if name:
-        base_name += f"_{name}"
-    if benchmark_config.concurrency_min and benchmark_config.concurrency_max:
-        base_name += (
-            f"_c{benchmark_config.concurrency_min}-{benchmark_config.concurrency_max}"
-        )
-
-    # Create figure with subplots for each workload (side-by-side layout)
-    num_workloads = len(workload_results)
-    fig, axes = plt.subplots(num_workloads, 2, figsize=(14, 6 * num_workloads))
-
-    # Handle case of single workload
-    if num_workloads == 1:
-        axes = axes.reshape(1, 2)
-
-    colors = [
-        "#1f77b4",
-        "#ff7f0e",
-        "#2ca02c",
-        "#d62728",
-        "#9467bd",
-        "#8c564b",
-        "#e377c2",
-        "#7f7f7f",
-        "#bcbd22",
-        "#17becf",
-    ]
-
-    for idx, (workload_name, data) in enumerate(workload_results.items()):
-        results = data["results"]
-        concurrency_levels = [r["concurrency"] for r in results]
-        queries_per_sec = [r["queries_per_sec"] for r in results]
-        avg_latencies = [r["avg_latency_ms"] for r in results]
-        latency_samples = [r.get("latency_samples", []) for r in results]
-
-        color = colors[idx % len(colors)]
-
-        # Plot queries per second (left column)
-        ax1 = axes[idx, 0]
-        ax1.plot(
-            concurrency_levels,
-            queries_per_sec,
-            color=color,
-            marker="o",
-            linewidth=2,
-            markersize=8,
-        )
-        ax1.set_xlabel("Concurrency (workers)", fontsize=11)
-        ax1.set_ylabel("Queries per Second", fontsize=11)
-        ax1.set_title(f"Throughput: {workload_name}", fontsize=12, fontweight="bold")
-        ax1.grid(True, alpha=0.3)
-        ax1.set_xscale("log", base=2)
-        ax1.set_xticks(concurrency_levels)
-        ax1.set_xticklabels([str(c) for c in concurrency_levels], rotation=45)
-        ax1.set_ylim(bottom=0)
-
-        # Add value labels
-        for x, y in zip(concurrency_levels, queries_per_sec):
-            ax1.annotate(
-                f"{y:.0f}",
-                (x, y),
-                textcoords="offset points",
-                xytext=(0, 10),
-                ha="center",
-                fontsize=8,
-            )
-
-        # Plot latency distribution as violin plot (right column)
-        ax2 = axes[idx, 1]
-
-        # Prepare data for violin plot
-        positions = list(range(len(concurrency_levels)))
-
-        # Filter out empty sample lists
-        valid_samples = [s if s else [0] for s in latency_samples]
-
-        # Create violin plot
-        if any(len(s) > 0 for s in valid_samples):
-            parts = ax2.violinplot(
-                valid_samples,
-                positions=positions,
-                widths=0.7,
-                showmeans=True,
-                showextrema=True,
-                showmedians=True,
-            )
-
-            # Customize violin plot colors
-            for pc in parts["bodies"]:
-                pc.set_facecolor(color)
-                pc.set_alpha(0.7)
-
-        ax2.set_xlabel("Concurrency (workers)", fontsize=11)
-        ax2.set_ylabel("Latency (ms)", fontsize=11)
-        ax2.set_title(
-            f"Latency Distribution: {workload_name}", fontsize=12, fontweight="bold"
-        )
-        ax2.grid(True, alpha=0.3, axis="y")
-        ax2.set_xticks(positions)
-        ax2.set_xticklabels([str(c) for c in concurrency_levels], rotation=45)
-        ax2.set_ylim(bottom=0)
-
-        # Add median values as text annotations
-        for i, (pos, samples) in enumerate(zip(positions, valid_samples)):
-            if samples and len(samples) > 0:
-                median = sorted(samples)[len(samples) // 2]
-                ax2.annotate(
-                    f"{median:.1f}",
-                    (pos, median),
-                    textcoords="offset points",
-                    xytext=(0, -15),
-                    ha="center",
-                    fontsize=8,
-                    color="darkred",
-                )
-
-    title = "PostgreSQL Workload Benchmark Results"
-    if name:
-        title += f": {name}"
-    title += f"\n{timestamp}"
-
-    plt.suptitle(title, fontsize=16, fontweight="bold")
-    plt.tight_layout()
-
-    # Save plot
-    try:
-        svg_filename = f"{base_name}.svg"
-        plt.savefig(svg_filename, format="svg", dpi=150, bbox_inches="tight")
-        plt.close()
-        return svg_filename
-    except Exception as e:
-        click.echo(f"Warning: Could not save as SVG ({e}), saving as PNG instead")
-        png_filename = f"{base_name}.png"
-        plt.savefig(png_filename, format="png", dpi=150, bbox_inches="tight")
-        plt.close()
-        return png_filename
 
 
 async def run_async(
@@ -746,7 +326,9 @@ async def run_async(
         raise click.ClickException(f"Error parsing workload: {e}") from e
 
     # Run setup queries
-    await run_setup(urls, benchmark_config.setup_queries)
+    await run_queries_on_connection(
+        urls, benchmark_config.setup_queries, "setup queries"
+    )
 
     try:
         # Determine if we're in range mode or single mode
@@ -755,7 +337,7 @@ async def run_async(
             click.echo("PostgreSQL Workload Benchmark - Range Mode")
             click.echo("=" * 60)
             click.echo(f"Workload:          {workload_path}")
-            targets = [url.split('@')[-1] if '@' in url else url for url in urls]
+            targets = format_target_list(urls)
             if len(targets) == 1:
                 click.echo(f"Target:            {targets[0]}")
             else:
@@ -796,7 +378,7 @@ async def run_async(
                         avg_latency,
                         samples,
                     ) = await run_single_workload_benchmark(
-                        url, c, benchmark_config.duration, workload, quiet=False
+                        urls, c, benchmark_config.duration, workload, quiet=False
                     )
 
                     workload_results[workload_name]["results"].append(
@@ -840,12 +422,60 @@ async def run_async(
 
             # Save results
             click.echo("\nSaving results...")
+
+            # Transform results for JSON output
+            results_data = {
+                "workload_file": workload_path,
+                "duration_per_run": benchmark_config.duration,
+                "concurrency_min": benchmark_config.concurrency_min,
+                "concurrency_max": benchmark_config.concurrency_max,
+                "workloads": {},
+            }
+
+            for workload_name, data in workload_results.items():
+                results_data["workloads"][workload_name] = {
+                    "results": enhance_results_with_percentiles(data["results"])
+                }
+
             json_filename = save_json_results(
-                workload_results, workload_path, benchmark_config, name, ','.join(urls)
+                results_data,
+                "pg_workload_bench",
+                name,
+                ",".join(urls),
+                benchmark_config.concurrency_min,
+                benchmark_config.concurrency_max,
             )
             click.echo(f"✅ Raw results saved to: {json_filename}")
 
-            plot_filename = save_plots(workload_results, benchmark_config, name)
+            # Generate plots
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base_name = f"pg_workload_bench_{timestamp}"
+            if name:
+                base_name += f"_{name}"
+            base_name += f"_c{benchmark_config.concurrency_min}-{benchmark_config.concurrency_max}"
+
+            # Prepare datasets for plotting
+            datasets = []
+            for workload_name, data in workload_results.items():
+                results = data["results"]
+                datasets.append(
+                    {
+                        "label": workload_name,
+                        "concurrency_levels": [r["concurrency"] for r in results],
+                        "throughput": [r["queries_per_sec"] for r in results],
+                        "avg_latencies": [r["avg_latency_ms"] for r in results],
+                        "latency_samples": [
+                            r.get("latency_samples", []) for r in results
+                        ],
+                    }
+                )
+
+            title = "PostgreSQL Workload Benchmark Results"
+            if name:
+                title += f": {name}"
+            title += f"\n{timestamp}"
+
+            plot_filename = create_violin_plots(title, datasets, base_name)
             click.echo(f"✅ Performance plots saved to: {plot_filename}")
 
         else:
@@ -855,7 +485,7 @@ async def run_async(
             click.echo("PostgreSQL Workload Benchmark - Single Mode")
             click.echo("=" * 60)
             click.echo(f"Workload:    {workload_path}")
-            targets = [url.split('@')[-1] if '@' in url else url for url in urls]
+            targets = format_target_list(urls)
             if len(targets) == 1:
                 click.echo(f"Target:      {targets[0]}")
             else:
@@ -891,14 +521,27 @@ async def run_async(
                 }
 
             # Save results
+            results_data = {
+                "workload_file": workload_path,
+                "duration_per_run": benchmark_config.duration,
+                "concurrency": concurrency,
+                "workloads": {
+                    workload_name: {
+                        "results": enhance_results_with_percentiles(data["results"])
+                    }
+                    for workload_name, data in workload_results.items()
+                },
+            }
             json_filename = save_json_results(
-                workload_results, workload_path, benchmark_config, name, ','.join(urls)
+                results_data, "pg_workload_bench", name, ",".join(urls)
             )
             click.echo(f"\n✅ Raw results saved to: {json_filename}")
 
     finally:
         # Run teardown queries
-        await run_teardown(urls, benchmark_config.teardown_queries)
+        await run_queries_on_connection(
+            urls, benchmark_config.teardown_queries, "teardown queries"
+        )
 
 
 def plot_from_json(
@@ -906,23 +549,10 @@ def plot_from_json(
     output_name: Optional[str],
 ) -> None:
     """Load multiple JSON result files and create combined plots."""
-    all_data = []
-
-    # Load all JSON files
-    for json_file in json_files:
-        try:
-            with open(json_file) as f:
-                data = json.load(f)
-                all_data.append(data)
-                name = data.get("name", "unnamed")
-                timestamp = data.get("timestamp", "no timestamp")
-                click.echo(f"Loaded: {json_file} ({name} - {timestamp})")
-        except Exception as e:
-            click.echo(f"Error loading {json_file}: {e}", err=True)
-            continue
-
-    if not all_data:
-        click.echo("No valid JSON files loaded.", err=True)
+    try:
+        all_data = load_json_results(json_files)
+    except ValueError as e:
+        click.echo(str(e), err=True)
         return
 
     # Get all unique workload names
@@ -937,37 +567,13 @@ def plot_from_json(
         click.echo("No workloads found in JSON files.", err=True)
         return
 
-    # Create figure (side-by-side layout)
-    fig, axes = plt.subplots(num_workloads, 2, figsize=(14, 6 * num_workloads))
-
-    # Handle single workload case
-    if num_workloads == 1:
-        axes = axes.reshape(1, 2)
-
-    colors = [
-        "#1f77b4",
-        "#ff7f0e",
-        "#2ca02c",
-        "#d62728",
-        "#9467bd",
-        "#8c564b",
-        "#e377c2",
-        "#7f7f7f",
-        "#bcbd22",
-        "#17becf",
-    ]
-    markers = ["o", "s", "^", "v", "D", "p", "*", "h", "X", "+"]
-
-    for workload_idx, workload_name in enumerate(workloads_list):
-        ax1 = axes[workload_idx, 0]
-        ax2 = axes[workload_idx, 1]
+    # Create datasets for each workload
+    for workload_name in workloads_list:
+        datasets = []
 
         for data_idx, data in enumerate(all_data):
             if workload_name not in data.get("workloads", {}):
                 continue
-
-            color = colors[data_idx % len(colors)]
-            marker = markers[data_idx % len(markers)]
 
             results = data["workloads"][workload_name]["results"]
             concurrency_levels = [r["concurrency"] for r in results]
@@ -979,74 +585,33 @@ def plot_from_json(
                 timestamp = datetime.fromisoformat(data["timestamp"])
                 label += f" ({timestamp.strftime('%Y-%m-%d %H:%M')})"
 
-            # Plot throughput
-            ax1.plot(
-                concurrency_levels,
-                queries_per_sec,
-                color=color,
-                marker=marker,
-                linewidth=2,
-                markersize=8,
-                label=label,
-                alpha=0.8,
+            datasets.append(
+                {
+                    "label": label,
+                    "concurrency_levels": concurrency_levels,
+                    "throughput": queries_per_sec,
+                    "avg_latencies": avg_latencies,
+                }
             )
 
-            # Plot latency
-            ax2.plot(
-                concurrency_levels,
-                avg_latencies,
-                color=color,
-                marker=marker,
-                linewidth=2,
-                markersize=8,
-                label=label,
-                alpha=0.8,
+        if datasets:
+            # Create comparison plot for this workload
+            title = f"PostgreSQL Workload Benchmark Comparison: {workload_name}"
+            if output_name:
+                title += f" - {output_name}"
+            title += f"\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base_name = f"pg_workload_bench_comparison_{workload_name}_{timestamp}"
+            if output_name:
+                base_name += f"_{output_name}"
+
+            plot_filename = create_throughput_latency_plots(
+                title, datasets, base_name, "Queries per Second", "Average Latency (ms)"
             )
-
-        # Configure throughput subplot
-        ax1.set_xlabel("Concurrency (workers)", fontsize=11)
-        ax1.set_ylabel("Queries per Second", fontsize=11)
-        ax1.set_title(f"Throughput: {workload_name}", fontsize=12, fontweight="bold")
-        ax1.grid(True, alpha=0.3)
-        ax1.set_xscale("log", base=2)
-        ax1.set_ylim(bottom=0)
-        ax1.legend(loc="best", fontsize=8)
-
-        # Configure latency subplot
-        ax2.set_xlabel("Concurrency (workers)", fontsize=11)
-        ax2.set_ylabel("Average Latency (ms)", fontsize=11)
-        ax2.set_title(f"Latency: {workload_name}", fontsize=12, fontweight="bold")
-        ax2.grid(True, alpha=0.3)
-        ax2.set_xscale("log", base=2)
-        ax2.set_ylim(bottom=0)
-        ax2.legend(loc="best", fontsize=8)
-
-    # Add overall title
-    title = "PostgreSQL Workload Benchmark Comparison"
-    if output_name:
-        title += f": {output_name}"
-    title += f"\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-
-    plt.suptitle(title, fontsize=16, fontweight="bold")
-    plt.tight_layout()
-
-    # Save plot
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_name = f"pg_workload_bench_comparison_{timestamp}"
-    if output_name:
-        base_name += f"_{output_name}"
-
-    try:
-        svg_filename = f"{base_name}.svg"
-        plt.savefig(svg_filename, format="svg", dpi=150, bbox_inches="tight")
-        plt.close()
-        click.echo(f"\n✅ Comparison plot saved to: {svg_filename}")
-    except Exception as e:
-        click.echo(f"Warning: Could not save as SVG ({e}), saving as PNG instead")
-        png_filename = f"{base_name}.png"
-        plt.savefig(png_filename, format="png", dpi=150, bbox_inches="tight")
-        plt.close()
-        click.echo(f"\n✅ Comparison plot saved to: {png_filename}")
+            click.echo(
+                f"\n✅ Comparison plot for {workload_name} saved to: {plot_filename}"
+            )
 
 
 @click.group(invoke_without_command=True)
@@ -1089,7 +654,9 @@ def cli(ctx):
     default=20,
     help="Wait time in seconds between different concurrency runs (default: 20)",
 )
-def run(url: tuple[str, ...], workload: str, name: Optional[str], wait_between_runs: int):
+def run(
+    url: tuple[str, ...], workload: str, name: Optional[str], wait_between_runs: int
+):
     """Run workload benchmarks using an INI configuration file.
 
     The INI file should define workloads, setup/teardown queries, and parameters.
@@ -1119,7 +686,7 @@ def run(url: tuple[str, ...], workload: str, name: Optional[str], wait_between_r
     """
     # Convert tuple to list
     urls = list(url)
-    
+
     try:
         asyncio.run(run_async(urls, workload, name, wait_between_runs))
     except KeyboardInterrupt:
