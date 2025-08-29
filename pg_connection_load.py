@@ -24,9 +24,9 @@ class ConnectionPool:
         self,
         postgres_url: str,
         num_connections: int,
+        keep_alive_interval: int,
         batch_size: int = 20,
         batch_pause: float = 0.0,
-        keep_alive_interval: int = 60,
     ):
         self.postgres_url = postgres_url
         self.num_connections = num_connections
@@ -271,7 +271,7 @@ async def run_async(
     click.echo()
 
     pool = ConnectionPool(
-        url, connections, batch_size, batch_pause, keep_alive_interval
+        url, connections, keep_alive_interval, batch_size, batch_pause
     )
 
     def shutdown_handler(sig):
@@ -365,9 +365,9 @@ async def run_async(
     "--keep-alive-interval",
     "-k",
     type=click.IntRange(min=0),
-    default=600,
+    default=0,
     help="Interval in seconds for keep-alive queries, staggered across "
-    "connections (0 = disabled, default: 600)",
+    "connections (0 = disabled, default: 0)",
 )
 def main(
     url: str,
