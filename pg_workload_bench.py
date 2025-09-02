@@ -18,7 +18,7 @@ from pg_bench_common.database import (
     setup_database_connection,
 )
 from pg_bench_common.plotting import (
-    create_throughput_latency_plots,
+    create_comparison_violin_plots,
     create_violin_plots,
     enhance_results_with_percentiles,
     load_json_results,
@@ -240,7 +240,7 @@ async def run_single_workload_benchmark(
     benchmark = None
     reporter = None
     cancelled = False
-    
+
     try:
         if not quiet:
             click.echo(f"\nBenchmarking Workload: {workload.name}")
@@ -290,7 +290,7 @@ async def run_single_workload_benchmark(
         # Wait for tasks to finish
         await asyncio.gather(*worker_tasks, reporter_task, return_exceptions=True)
 
-    except (asyncio.CancelledError, KeyboardInterrupt) as e:
+    except (asyncio.CancelledError, KeyboardInterrupt):
         # Mark that we were cancelled but still need to cleanup
         cancelled = True
     finally:
@@ -300,7 +300,7 @@ async def run_single_workload_benchmark(
             await asyncio.sleep(0.1)
             if not quiet and not cancelled:
                 benchmark.print_summary()
-        
+
         # Re-raise the cancellation after cleanup
         if cancelled:
             raise asyncio.CancelledError()
@@ -594,12 +594,19 @@ def plot_from_json(
                 timestamp = datetime.fromisoformat(data["timestamp"])
                 label += f" ({timestamp.strftime('%Y-%m-%d %H:%M')})"
 
+            # Extract latency samples if available
+            latency_samples = []
+            for r in results:
+                samples = r.get("latency_samples", [])
+                latency_samples.append(samples)
+
             datasets.append(
                 {
                     "label": label,
                     "concurrency_levels": concurrency_levels,
                     "throughput": queries_per_sec,
                     "avg_latencies": avg_latencies,
+                    "latency_samples": latency_samples,
                 }
             )
 
@@ -615,9 +622,7 @@ def plot_from_json(
             if output_name:
                 base_name += f"_{output_name}"
 
-            plot_filename = create_throughput_latency_plots(
-                title, datasets, base_name, "Queries per Second", "Average Latency (ms)"
-            )
+            plot_filename = create_comparison_violin_plots(title, datasets, base_name)
             click.echo(
                 f"\n✅ Comparison plot for {workload_name} saved to: {plot_filename}"
             )

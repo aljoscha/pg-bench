@@ -183,6 +183,203 @@ def create_throughput_latency_plots(
     return _save_plot(output_filename, fig)
 
 
+def create_comparison_violin_plots(
+    title: str,
+    datasets: list[dict[str, Any]],
+    output_filename: str,
+    throughput_ylabel: str = "Queries per Second",
+    latency_ylabel: str = "Latency (ms)",
+) -> str:
+    """Create comparison plots with throughput lines and violin plots for latency.
+
+    Args:
+        title: Overall plot title
+        datasets: List of datasets to plot, each containing:
+                 - label: Display name
+                 - concurrency_levels: X-axis values
+                 - throughput: Y-axis values for throughput plot
+                 - avg_latencies: Y-axis values for latency plot
+                 - latency_samples: For violin plots
+        output_filename: Base filename for output
+        throughput_ylabel: Y-axis label for throughput plot
+        latency_ylabel: Y-axis label for latency plot
+
+    Returns:
+        Saved filename
+    """
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
+
+    # Get all unique concurrency levels across datasets
+    all_concurrency = set()
+    for dataset in datasets:
+        all_concurrency.update(dataset["concurrency_levels"])
+    sorted_concurrency = sorted(all_concurrency)
+
+    # Plot throughput with lines for each dataset
+    for idx, dataset in enumerate(datasets):
+        color = PLOT_COLORS[idx % len(PLOT_COLORS)]
+        marker = PLOT_MARKERS[idx % len(PLOT_MARKERS)]
+
+        concurrency_levels = dataset["concurrency_levels"]
+        throughput = dataset["throughput"]
+        label = dataset["label"]
+
+        # Throughput plot
+        ax1.plot(
+            concurrency_levels,
+            throughput,
+            color=color,
+            marker=marker,
+            linewidth=2,
+            markersize=8,
+            label=label,
+            alpha=0.8,
+        )
+
+        # Add value labels for throughput
+        for x, y in zip(concurrency_levels, throughput):
+            ax1.annotate(
+                f"{y:.0f}",
+                (x, y),
+                textcoords="offset points",
+                xytext=(0, 8),
+                ha="center",
+                fontsize=7,
+                color=color,
+                alpha=0.9,
+            )
+
+    # Configure throughput plot
+    ax1.set_xlabel("Concurrency (workers)", fontsize=12)
+    ax1.set_ylabel(throughput_ylabel, fontsize=12)
+    ax1.set_title("Throughput Comparison", fontsize=14, fontweight="bold")
+    ax1.grid(True, alpha=0.3)
+    ax1.set_xscale("log", base=2)
+    ax1.set_xticks(sorted_concurrency)
+    ax1.set_xticklabels([str(c) for c in sorted_concurrency], rotation=45)
+    ax1.set_ylim(bottom=0)
+    if len(datasets) > 1:
+        ax1.legend(loc="best", fontsize=9)
+
+    # Prepare data for violin plots
+    violin_data_by_concurrency = {}
+    dataset_labels = []
+
+    for idx, dataset in enumerate(datasets):
+        dataset_labels.append(dataset["label"])
+        concurrency_levels = dataset["concurrency_levels"]
+        latency_samples = dataset.get("latency_samples", [])
+
+        for c_level, samples in zip(concurrency_levels, latency_samples):
+            if c_level not in violin_data_by_concurrency:
+                violin_data_by_concurrency[c_level] = []
+            # Pad with None for missing datasets at this concurrency
+            while len(violin_data_by_concurrency[c_level]) < idx:
+                violin_data_by_concurrency[c_level].append(None)
+            violin_data_by_concurrency[c_level].append(samples if samples else None)
+
+    # Ensure all concurrency levels have data for all datasets (pad with None)
+    for c_level in violin_data_by_concurrency:
+        while len(violin_data_by_concurrency[c_level]) < len(datasets):
+            violin_data_by_concurrency[c_level].append(None)
+
+    # Create violin plots grouped by concurrency level
+    positions = []
+    labels_for_xticks = []
+    violin_position = 0
+    group_width = 0.8
+
+    for _c_idx, c_level in enumerate(sorted_concurrency):
+        if c_level in violin_data_by_concurrency:
+            samples_list = violin_data_by_concurrency[c_level]
+            num_datasets_at_level = sum(1 for s in samples_list if s is not None)
+
+            if num_datasets_at_level > 0:
+                # Calculate positions for this concurrency level
+                if num_datasets_at_level == 1:
+                    dataset_positions = [violin_position]
+                else:
+                    step = group_width / (num_datasets_at_level - 1)
+                    dataset_positions = [
+                        violin_position - group_width/2 + i * step
+                        for i in range(num_datasets_at_level)
+                    ]
+
+                # Draw violin for each dataset at this concurrency
+                pos_idx = 0
+                for dataset_idx, samples in enumerate(samples_list):
+                    if samples and len(samples) > 0:
+                        color = PLOT_COLORS[dataset_idx % len(PLOT_COLORS)]
+                        pos = dataset_positions[pos_idx]
+                        positions.append(pos)
+
+                        parts = ax2.violinplot(
+                            [samples],
+                            positions=[pos],
+                            widths=group_width / (num_datasets_at_level + 1),
+                            showmeans=True,
+                            showextrema=True,
+                            showmedians=True,
+                        )
+
+                        for pc in parts["bodies"]:
+                            pc.set_facecolor(color)
+                            pc.set_alpha(0.6)
+
+                        # Color the other parts
+                        for partname in ["cmeans", "cmaxes", "cmins", "cbars", "cmedians"]:
+                            if partname in parts:
+                                parts[partname].set_color(color)
+                                parts[partname].set_alpha(0.8)
+
+                        # Add median annotation
+                        median = sorted(samples)[len(samples) // 2]
+                        ax2.annotate(
+                            f"{median:.1f}",
+                            (pos, median),
+                            textcoords="offset points",
+                            xytext=(0, -12),
+                            ha="center",
+                            fontsize=7,
+                            color=color,
+                            fontweight="bold",
+                        )
+
+                        pos_idx += 1
+
+                labels_for_xticks.append((violin_position, str(c_level)))
+                violin_position += 1.5
+
+    # Configure latency plot
+    ax2.set_xlabel("Concurrency (workers)", fontsize=12)
+    ax2.set_ylabel(latency_ylabel, fontsize=12)
+    ax2.set_title("Latency Distribution Comparison", fontsize=14, fontweight="bold")
+    ax2.grid(True, alpha=0.3, axis="y")
+
+    # Set x-ticks at the center of each concurrency group
+    if labels_for_xticks:
+        tick_positions, tick_labels = zip(*labels_for_xticks)
+        ax2.set_xticks(tick_positions)
+        ax2.set_xticklabels(tick_labels, rotation=45)
+
+    ax2.set_ylim(bottom=0)
+
+    # Add legend for violin plot
+    if len(datasets) > 1:
+        # Create dummy lines for legend
+        legend_elements = []
+        for idx, label in enumerate(dataset_labels):
+            color = PLOT_COLORS[idx % len(PLOT_COLORS)]
+            from matplotlib.patches import Patch
+            legend_elements.append(Patch(facecolor=color, alpha=0.6, label=label))
+        ax2.legend(handles=legend_elements, loc="best", fontsize=9)
+
+    plt.suptitle(title, fontsize=16, fontweight="bold")
+    plt.tight_layout()
+
+    return _save_plot(output_filename, fig)
+
+
 def create_violin_plots(
     title: str,
     datasets: list[dict[str, Any]],
