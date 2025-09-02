@@ -43,7 +43,6 @@ async def setup_database_connection(url: str, timeout: int = 30) -> asyncpg.Conn
         Exception: If connection fails
     """
     conn = await asyncpg.connect(url, timeout=timeout)
-    await conn.execute("SELECT 1")
     return conn
 
 
