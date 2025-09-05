@@ -155,6 +155,7 @@ class WorkloadBenchmark:
         self.stats = BenchmarkStats()
         self.stats_lock = asyncio.Lock()
         self.connections: list[asyncpg.Connection] = []
+        self.actual_end_time: Optional[float] = None
 
     async def setup_connections(self) -> None:
         """Create and store persistent connections."""
@@ -204,7 +205,11 @@ class WorkloadBenchmark:
 
     def print_summary(self) -> None:
         """Print final summary statistics."""
-        duration = time.time() - self.stats.start_time
+        duration = (
+            self.actual_end_time - self.stats.start_time
+            if self.actual_end_time
+            else time.time() - self.stats.start_time
+        )
 
         print_summary_header(f"Workload Summary: {self.workload.name}")
         print_benchmark_summary(
@@ -275,16 +280,19 @@ async def run_single_workload_benchmark(
         # Wait for the duration
         await asyncio.sleep(duration)
 
-        # Signal shutdown
+        # Signal shutdown - workers will finish their current batch then stop
         benchmark.shutdown = True
         reporter.stop()
 
-        # Cancel all tasks
-        for task in worker_tasks + [reporter_task]:
-            task.cancel()
+        # Wait for workers to complete naturally (finish in-flight queries)
+        await asyncio.gather(*worker_tasks, return_exceptions=False)
 
-        # Wait for tasks to finish
-        await asyncio.gather(*worker_tasks, reporter_task, return_exceptions=True)
+        # Record when all workers have actually finished
+        benchmark.actual_end_time = time.time()
+
+        # Cancel the reporter task
+        reporter_task.cancel()
+        await asyncio.gather(reporter_task, return_exceptions=True)
 
     except (asyncio.CancelledError, KeyboardInterrupt):
         # Mark that we were cancelled but still need to cleanup
@@ -301,9 +309,13 @@ async def run_single_workload_benchmark(
         if cancelled:
             raise asyncio.CancelledError()
 
-    # Calculate metrics
-    duration = time.time() - benchmark.stats.start_time
-    avg_rate = benchmark.stats.total_operations / duration if duration > 0 else 0
+    # Calculate metrics using actual completion time
+    actual_duration = (
+        benchmark.actual_end_time - benchmark.stats.start_time
+        if benchmark.actual_end_time
+        else time.time() - benchmark.stats.start_time
+    )
+    avg_rate = benchmark.stats.total_operations / actual_duration if actual_duration > 0 else 0
     avg_latency = sum(benchmark.stats.latencies) / len(benchmark.stats.latencies) if benchmark.stats.latencies else 0
     latency_samples = sample_latencies(benchmark.stats.latencies)
     return workload.name, avg_rate, avg_latency, latency_samples
