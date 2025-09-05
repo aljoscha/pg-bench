@@ -101,6 +101,7 @@ def create_throughput_latency_plots(
     title: str,
     datasets: list[dict[str, Any]],
     output_filename: str,
+    plot_format: str,
     throughput_ylabel: str = "Operations per Second",
     latency_ylabel: str = "Latency (ms)",
 ) -> str:
@@ -180,13 +181,14 @@ def create_throughput_latency_plots(
     plt.suptitle(title, fontsize=16, fontweight="bold")
     plt.tight_layout()
 
-    return _save_plot(output_filename, fig)
+    return _save_plot(output_filename, fig, plot_format)
 
 
 def create_comparison_violin_plots(
     title: str,
     datasets: list[dict[str, Any]],
     output_filename: str,
+    plot_format: str,
     throughput_ylabel: str = "Queries per Second",
     latency_ylabel: str = "Latency (ms)",
 ) -> str:
@@ -301,8 +303,7 @@ def create_comparison_violin_plots(
                 else:
                     step = group_width / (num_datasets_at_level - 1)
                     dataset_positions = [
-                        violin_position - group_width/2 + i * step
-                        for i in range(num_datasets_at_level)
+                        violin_position - group_width / 2 + i * step for i in range(num_datasets_at_level)
                     ]
 
                 # Draw violin for each dataset at this concurrency
@@ -371,19 +372,21 @@ def create_comparison_violin_plots(
         for idx, label in enumerate(dataset_labels):
             color = PLOT_COLORS[idx % len(PLOT_COLORS)]
             from matplotlib.patches import Patch
+
             legend_elements.append(Patch(facecolor=color, alpha=0.6, label=label))
         ax2.legend(handles=legend_elements, loc="best", fontsize=9)
 
     plt.suptitle(title, fontsize=16, fontweight="bold")
     plt.tight_layout()
 
-    return _save_plot(output_filename, fig)
+    return _save_plot(output_filename, fig, plot_format)
 
 
 def create_violin_plots(
     title: str,
     datasets: list[dict[str, Any]],
     output_filename: str,
+    plot_format: str,
 ) -> str:
     """Create violin plots for latency distributions.
 
@@ -484,7 +487,7 @@ def create_violin_plots(
     plt.suptitle(title, fontsize=16, fontweight="bold")
     plt.tight_layout()
 
-    return _save_plot(output_filename, fig)
+    return _save_plot(output_filename, fig, plot_format)
 
 
 def load_json_results(json_files: list[str]) -> list[dict]:
@@ -516,24 +519,29 @@ def load_json_results(json_files: list[str]) -> list[dict]:
     return all_data
 
 
-def _save_plot(filename: str, fig) -> str:
-    """Save plot with fallback from SVG to PNG.
+def _save_plot(filename: str, fig, plot_format: str) -> str:
+    """Save plot in the specified format.
 
     Args:
         filename: Base filename (without extension)
         fig: Matplotlib figure object
+        plot_format: Format to save plot in (png or svg)
 
     Returns:
         Actual saved filename
     """
+    plot_filename = f"{filename}.{plot_format}"
     try:
-        svg_filename = f"{filename}.svg"
-        fig.savefig(svg_filename, format="svg", dpi=150, bbox_inches="tight")
+        fig.savefig(plot_filename, format=plot_format, dpi=150, bbox_inches="tight")
         plt.close(fig)
-        return svg_filename
+        return plot_filename
     except Exception as e:
-        click.echo(f"Warning: Could not save as SVG ({e}), saving as PNG instead")
-        png_filename = f"{filename}.png"
-        fig.savefig(png_filename, format="png", dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        return png_filename
+        # If requested format fails, fall back to PNG
+        if plot_format != "png":
+            click.echo(f"Warning: Could not save as {plot_format.upper()} ({e}), saving as PNG instead")
+            png_filename = f"{filename}.png"
+            fig.savefig(png_filename, format="png", dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            return png_filename
+        else:
+            raise

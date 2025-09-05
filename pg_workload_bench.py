@@ -270,7 +270,7 @@ async def run_single_workload_benchmark(
 
         # Setup connections
         await benchmark.setup_connections()
-        
+
         # Reset start time after connections are established to exclude setup time from QPS calculation
         benchmark.stats.start_time = time.time()
         benchmark.stats.last_report_time = time.time()
@@ -346,6 +346,7 @@ async def run_async(
     cli_concurrency_min: Optional[int],
     cli_concurrency_max: Optional[int],
     cli_wait_between_runs: Optional[int],
+    plot_format: str,
 ) -> None:
     """Async implementation of the workload benchmark."""
     # Parse workload configuration
@@ -512,7 +513,7 @@ async def run_async(
                 title += f": {name}"
             title += f"\n{timestamp}"
 
-            plot_filename = create_violin_plots(title, datasets, base_name)
+            plot_filename = create_violin_plots(title, datasets, base_name, plot_format)
             click.echo(f"✅ Performance plots saved to: {plot_filename}")
 
         else:
@@ -576,6 +577,7 @@ async def run_async(
 def plot_from_json(
     json_files: list[str],
     output_name: Optional[str],
+    plot_format: str,
 ) -> None:
     """Load multiple JSON result files and create combined plots."""
     try:
@@ -642,7 +644,7 @@ def plot_from_json(
             if output_name:
                 base_name += f"_{output_name}"
 
-            plot_filename = create_comparison_violin_plots(title, datasets, base_name)
+            plot_filename = create_comparison_violin_plots(title, datasets, base_name, plot_format)
             click.echo(f"\n✅ Comparison plot for {workload_name} saved to: {plot_filename}")
 
 
@@ -716,6 +718,12 @@ def cli(ctx):
     "When specified, overrides the wait-between-runs value from the INI configuration "
     "(default: 20 if not in INI).",
 )
+@click.option(
+    "--plot-format",
+    type=click.Choice(["png", "svg"], case_sensitive=False),
+    default="png",
+    help="Format for output plots (default: png)",
+)
 def run(
     url: tuple[str, ...],
     workload: str,
@@ -725,6 +733,7 @@ def run(
     concurrency_min: Optional[int],
     concurrency_max: Optional[int],
     wait_between_runs: Optional[int],
+    plot_format: str,
 ):
     """Run workload benchmarks using an INI configuration file.
 
@@ -767,6 +776,7 @@ def run(
                 concurrency_min,
                 concurrency_max,
                 wait_between_runs,
+                plot_format,
             )
         )
     except KeyboardInterrupt:
@@ -784,13 +794,19 @@ def run(
     default=None,
     help="Optional name for the output comparison plot",
 )
-def plot(json_files: tuple[str, ...], output_name: Optional[str]):
+@click.option(
+    "--plot-format",
+    type=click.Choice(["png", "svg"], case_sensitive=False),
+    default="png",
+    help="Format for output plots (default: png)",
+)
+def plot(json_files: tuple[str, ...], output_name: Optional[str], plot_format: str):
     """Create comparison plots from multiple benchmark JSON files.
 
     Example:
         pg-workload-bench plot result1.json result2.json result3.json
     """
-    plot_from_json(list(json_files), output_name)
+    plot_from_json(list(json_files), output_name, plot_format)
 
 
 if __name__ == "__main__":
