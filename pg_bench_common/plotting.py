@@ -54,7 +54,7 @@ def save_json_results(
     filename = f"{base_name}_{timestamp_str}"
 
     if name:
-        filename += f"_{name}"
+        filename += f"_{name.replace(' ', '_')}"
     if concurrency_min and concurrency_max:
         filename += f"_c{concurrency_min}-{concurrency_max}"
 

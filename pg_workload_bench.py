@@ -491,7 +491,7 @@ async def run_async(
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             base_name = f"pg_workload_bench_{timestamp}"
             if name:
-                base_name += f"_{name}"
+                base_name += f"_{name.replace(' ', '_')}"
             base_name += f"_c{benchmark_config.concurrency_min}-{benchmark_config.concurrency_max}"
 
             # Prepare datasets for plotting
@@ -640,9 +640,9 @@ def plot_from_json(
             title += f"\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            base_name = f"pg_workload_bench_comparison_{workload_name}_{timestamp}"
+            base_name = f"pg_workload_bench_comparison_{workload_name.replace(' ', '_')}_{timestamp}"
             if output_name:
-                base_name += f"_{output_name}"
+                base_name += f"_{output_name.replace(' ', '_')}"
 
             plot_filename = create_comparison_violin_plots(title, datasets, base_name, plot_format)
             click.echo(f"\n✅ Comparison plot for {workload_name} saved to: {plot_filename}")
