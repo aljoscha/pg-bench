@@ -55,6 +55,7 @@ class BenchmarkConfig:
     concurrency_min: Optional[int] = None
     concurrency_max: Optional[int] = None
     concurrency: Optional[int] = None
+    wait_between_runs: int = 20  # seconds between runs in range mode
     setup_queries: list[str] = field(default_factory=list)
     teardown_queries: list[str] = field(default_factory=list)
     workloads: list[WorkloadConfig] = field(default_factory=list)
@@ -112,12 +113,23 @@ def parse_ini_config(config_path: Path) -> BenchmarkConfig:
     if "concurrency-max" in default:
         concurrency_max = int(default["concurrency-max"])
 
+    # Parse wait-between-runs setting
+    wait_between_runs = 20  # default value in seconds
+    if "wait-between-runs" in default:
+        wait_between_runs_str = default["wait-between-runs"]
+        # Try to parse as duration string (e.g., "10s", "2m"), fall back to int
+        try:
+            wait_between_runs = parse_duration(wait_between_runs_str)
+        except (ValueError, AttributeError):
+            wait_between_runs = int(wait_between_runs_str)
+
     # Initialize config object
     benchmark_config = BenchmarkConfig(
         duration=duration,
         concurrency=concurrency,
         concurrency_min=concurrency_min,
         concurrency_max=concurrency_max,
+        wait_between_runs=wait_between_runs,
     )
 
     # Parse sections
@@ -325,7 +337,11 @@ async def run_async(
     urls: list[str],
     workload_path: str,
     name: Optional[str],
-    wait_between_runs: int,
+    cli_duration: Optional[str],
+    cli_concurrency: Optional[int],
+    cli_concurrency_min: Optional[int],
+    cli_concurrency_max: Optional[int],
+    cli_wait_between_runs: Optional[int],
 ) -> None:
     """Async implementation of the workload benchmark."""
     # Parse workload configuration
@@ -337,6 +353,25 @@ async def run_async(
         benchmark_config = parse_ini_config(workload_file)
     except Exception as e:
         raise click.ClickException(f"Error parsing workload: {e}") from e
+
+    # Apply CLI overrides if provided
+    if cli_duration is not None:
+        benchmark_config.duration = parse_duration(cli_duration)
+
+    if cli_concurrency is not None:
+        # Setting concurrency overrides range mode
+        benchmark_config.concurrency = cli_concurrency
+        benchmark_config.concurrency_min = None
+        benchmark_config.concurrency_max = None
+
+    if cli_concurrency_min is not None:
+        benchmark_config.concurrency_min = cli_concurrency_min
+
+    if cli_concurrency_max is not None:
+        benchmark_config.concurrency_max = cli_concurrency_max
+
+    if cli_wait_between_runs is not None:
+        benchmark_config.wait_between_runs = cli_wait_between_runs
 
     # Run setup queries
     await run_queries_on_connection(urls, benchmark_config.setup_queries, "setup queries")
@@ -361,7 +396,7 @@ async def run_async(
                 f"Concurrency Range: {benchmark_config.concurrency_min} - {benchmark_config.concurrency_max} workers"
             )
             click.echo(f"Duration per run:  {benchmark_config.duration} seconds")
-            click.echo(f"Wait between runs: {wait_between_runs} seconds")
+            click.echo(f"Wait between runs: {benchmark_config.wait_between_runs} seconds")
             click.echo("=" * 60)
 
             concurrency_levels = generate_power_of_2_range(
@@ -400,8 +435,8 @@ async def run_async(
 
                 # Brief pause between concurrency levels
                 if i < len(concurrency_levels):
-                    click.echo(f"\nWaiting {wait_between_runs} seconds before next run...")
-                    await asyncio.sleep(wait_between_runs)
+                    click.echo(f"\nWaiting {benchmark_config.wait_between_runs} seconds before next run...")
+                    await asyncio.sleep(benchmark_config.wait_between_runs)
 
             # Generate summary table
             click.echo("\n" + "=" * 80)
@@ -642,12 +677,51 @@ def cli(ctx):
     help="Optional name for the benchmark run (included in output files and plots)",
 )
 @click.option(
-    "--wait-between-runs",
-    type=click.IntRange(min=0),
-    default=20,
-    help="Wait time in seconds between different concurrency runs (default: 20)",
+    "--duration",
+    type=str,
+    default=None,
+    help="Override duration from INI file (e.g., 10s, 5m, 1h). "
+    "When specified, overrides the duration value from the INI configuration.",
 )
-def run(url: tuple[str, ...], workload: str, name: Optional[str], wait_between_runs: int):
+@click.option(
+    "--concurrency",
+    type=int,
+    default=None,
+    help="Override concurrency from INI file. When specified, forces single-mode "
+    "with this concurrency level, ignoring any concurrency-min/max settings in the INI.",
+)
+@click.option(
+    "--concurrency-min",
+    type=int,
+    default=None,
+    help="Override minimum concurrency from INI file. When specified with "
+    "--concurrency-max, enables range mode and overrides INI values.",
+)
+@click.option(
+    "--concurrency-max",
+    type=int,
+    default=None,
+    help="Override maximum concurrency from INI file. When specified with "
+    "--concurrency-min, enables range mode and overrides INI values.",
+)
+@click.option(
+    "--wait-between-runs",
+    type=int,
+    default=None,
+    help="Override wait time in seconds between different concurrency runs. "
+    "When specified, overrides the wait-between-runs value from the INI configuration "
+    "(default: 20 if not in INI).",
+)
+def run(
+    url: tuple[str, ...],
+    workload: str,
+    name: Optional[str],
+    duration: Optional[str],
+    concurrency: Optional[int],
+    concurrency_min: Optional[int],
+    concurrency_max: Optional[int],
+    wait_between_runs: Optional[int],
+):
     """Run workload benchmarks using an INI configuration file.
 
     The INI file should define workloads, setup/teardown queries, and parameters.
@@ -679,7 +753,18 @@ def run(url: tuple[str, ...], workload: str, name: Optional[str], wait_between_r
     urls = list(url)
 
     try:
-        asyncio.run(run_async(urls, workload, name, wait_between_runs))
+        asyncio.run(
+            run_async(
+                urls,
+                workload,
+                name,
+                duration,
+                concurrency,
+                concurrency_min,
+                concurrency_max,
+                wait_between_runs,
+            )
+        )
     except KeyboardInterrupt:
         pass
     except Exception as e:
