@@ -42,13 +42,9 @@ class ConnectionPool:
     async def open_connections(self) -> None:
         """Open the specified number of connections to PostgreSQL in batches."""
         batch_info = f" (batch size: {self.batch_size}" + (
-            f", {self.batch_pause}s pause between batches)"
-            if self.batch_pause > 0
-            else ")"
+            f", {self.batch_pause}s pause between batches)" if self.batch_pause > 0 else ")"
         )
-        click.echo(
-            f"Opening {self.num_connections} connections to PostgreSQL{batch_info}..."
-        )
+        click.echo(f"Opening {self.num_connections} connections to PostgreSQL{batch_info}...")
 
         # Calculate batches
         num_batches = (self.num_connections + self.batch_size - 1) // self.batch_size
@@ -77,31 +73,21 @@ class ConnectionPool:
                 connection_num = start_idx + i + 1
                 if isinstance(result, Exception):
                     click.echo(
-                        f"    ✗ Failed to establish connection "
-                        f"{connection_num}: {result}",
+                        f"    ✗ Failed to establish connection {connection_num}: {result}",
                         err=True,
                     )
                     self.connections.append(None)
                 else:
                     self.connections.append(result)
-                    click.echo(
-                        f"    ✓ Connection {connection_num}/"
-                        f"{self.num_connections} established"
-                    )
+                    click.echo(f"    ✓ Connection {connection_num}/{self.num_connections} established")
 
             # Pause between batches (except for the last batch)
-            if (
-                batch_num < num_batches - 1
-                and self.batch_pause > 0
-                and not self.shutdown
-            ):
+            if batch_num < num_batches - 1 and self.batch_pause > 0 and not self.shutdown:
                 click.echo(f"    Pausing {self.batch_pause}s before next batch...")
                 await asyncio.sleep(self.batch_pause)
 
         successful = sum(1 for c in self.connections if c is not None)
-        click.echo(
-            f"\nSuccessfully opened {successful}/{self.num_connections} connections"
-        )
+        click.echo(f"\nSuccessfully opened {successful}/{self.num_connections} connections")
 
     async def _open_connection(self, index: int) -> asyncpg.Connection:
         """Open a single connection."""
@@ -119,10 +105,7 @@ class ConnectionPool:
             else:
                 raise Exception(f"Connection {index + 1}: OS Error: {str(e)}") from e
         except asyncpg.exceptions.TooManyConnectionsError as e:
-            raise Exception(
-                f"Connection {index + 1}: PostgreSQL server connection "
-                f"limit reached: {str(e)}"
-            ) from e
+            raise Exception(f"Connection {index + 1}: PostgreSQL server connection limit reached: {str(e)}") from e
         except Exception as e:
             raise Exception(f"Connection {index + 1}: {e}") from e
 
@@ -149,9 +132,7 @@ class ConnectionPool:
         except Exception as e:
             click.echo(f"  ✗ Error closing connection {index + 1}: {e}", err=True)
 
-    async def _keep_alive_task(
-        self, conn: asyncpg.Connection, index: int, initial_delay: float
-    ) -> None:
+    async def _keep_alive_task(self, conn: asyncpg.Connection, index: int, initial_delay: float) -> None:
         """Run periodic keep-alive queries on a connection."""
         # Wait for the initial staggered delay
         await asyncio.sleep(initial_delay)
@@ -167,10 +148,7 @@ class ConnectionPool:
 
                 # Log every 10th keep-alive or if latency is high
                 if self.keep_alive_count % 10 == 0 or latency > 100:
-                    click.echo(
-                        f"  Keep-alive #{self.keep_alive_count} on "
-                        f"connection {index + 1}: {latency:.1f}ms"
-                    )
+                    click.echo(f"  Keep-alive #{self.keep_alive_count} on connection {index + 1}: {latency:.1f}ms")
 
                 # Wait for the next interval
                 await asyncio.sleep(self.keep_alive_interval)
@@ -179,9 +157,7 @@ class ConnectionPool:
                 break
             except Exception as e:
                 self.keep_alive_errors += 1
-                click.echo(
-                    f"  ✗ Keep-alive error on connection {index + 1}: {e}", err=True
-                )
+                click.echo(f"  ✗ Keep-alive error on connection {index + 1}: {e}", err=True)
                 # Don't exit the loop, just continue with next keep-alive
                 await asyncio.sleep(self.keep_alive_interval)
 
@@ -190,19 +166,12 @@ class ConnectionPool:
         if self.keep_alive_interval <= 0:
             return
 
-        active_connections = [
-            (i, conn) for i, conn in enumerate(self.connections) if conn is not None
-        ]
+        active_connections = [(i, conn) for i, conn in enumerate(self.connections) if conn is not None]
         if not active_connections:
             return
 
-        click.echo(
-            f"\nStarting keep-alive queries (interval: {self.keep_alive_interval}s)"
-        )
-        click.echo(
-            f"Staggering {len(active_connections)} connections across "
-            f"{self.keep_alive_interval}s interval..."
-        )
+        click.echo(f"\nStarting keep-alive queries (interval: {self.keep_alive_interval}s)")
+        click.echo(f"Staggering {len(active_connections)} connections across {self.keep_alive_interval}s interval...")
 
         # Calculate stagger delay for each connection
         stagger_interval = self.keep_alive_interval / len(active_connections)
@@ -212,21 +181,13 @@ class ConnectionPool:
             task = asyncio.create_task(self._keep_alive_task(conn, i, initial_delay))
             self.keep_alive_tasks.append(task)
 
-            if (
-                conn_index < 5 or conn_index == len(active_connections) - 1
-            ):  # Show first few and last
-                click.echo(
-                    f"  Connection {i + 1} will start keep-alive at "
-                    f"+{initial_delay:.1f}s"
-                )
+            if conn_index < 5 or conn_index == len(active_connections) - 1:  # Show first few and last
+                click.echo(f"  Connection {i + 1} will start keep-alive at +{initial_delay:.1f}s")
 
         if len(active_connections) > 6:
             click.echo(f"  ... ({len(active_connections) - 6} more connections)")
 
-        click.echo(
-            f"Keep-alive tasks started with {stagger_interval:.2f}s "
-            f"spacing between connections"
-        )
+        click.echo(f"Keep-alive tasks started with {stagger_interval:.2f}s spacing between connections")
 
     async def stop_keep_alive_tasks(self) -> None:
         """Stop all keep-alive tasks."""
@@ -239,9 +200,7 @@ class ConnectionPool:
 
         # Wait for all tasks to complete
         if self.keep_alive_tasks:
-            await asyncio.gather(
-                *[t for t in self.keep_alive_tasks if t], return_exceptions=True
-            )
+            await asyncio.gather(*[t for t in self.keep_alive_tasks if t], return_exceptions=True)
 
 
 async def run_async(
@@ -263,16 +222,12 @@ async def run_async(
     click.echo(f"Target: {targets[0]}")
     click.echo(f"Connections: {connections}")
     click.echo(f"Duration: {'infinite' if duration == 0 else f'{duration} seconds'}")
-    keep_alive_msg = (
-        "disabled" if keep_alive_interval == 0 else f"{keep_alive_interval} seconds"
-    )
+    keep_alive_msg = "disabled" if keep_alive_interval == 0 else f"{keep_alive_interval} seconds"
     click.echo(f"Keep-alive interval: {keep_alive_msg}")
     click.echo(f"File descriptor limit: {get_current_fd_limit()}")
     click.echo()
 
-    pool = ConnectionPool(
-        url, connections, keep_alive_interval, batch_size, batch_pause
-    )
+    pool = ConnectionPool(url, connections, keep_alive_interval, batch_size, batch_pause)
 
     def shutdown_handler(sig):
         click.echo("\n\nReceived interrupt signal")
@@ -366,8 +321,7 @@ async def run_async(
     "-k",
     type=click.IntRange(min=0),
     default=0,
-    help="Interval in seconds for keep-alive queries, staggered across "
-    "connections (0 = disabled, default: 0)",
+    help="Interval in seconds for keep-alive queries, staggered across connections (0 = disabled, default: 0)",
 )
 def main(
     url: str,
@@ -379,11 +333,7 @@ def main(
 ):
     """Open and maintain idle PostgreSQL connections for load testing."""
     try:
-        asyncio.run(
-            run_async(
-                url, connections, duration, batch_size, batch_pause, keep_alive_interval
-            )
-        )
+        asyncio.run(run_async(url, connections, duration, batch_size, batch_pause, keep_alive_interval))
     except KeyboardInterrupt:
         pass
 
