@@ -270,6 +270,10 @@ async def run_single_workload_benchmark(
 
         # Setup connections
         await benchmark.setup_connections()
+        
+        # Reset start time after connections are established to exclude setup time from QPS calculation
+        benchmark.stats.start_time = time.time()
+        benchmark.stats.last_report_time = time.time()
 
         reporter = WorkloadReporter(benchmark.stats, benchmark.stats_lock, workload.name)
 
