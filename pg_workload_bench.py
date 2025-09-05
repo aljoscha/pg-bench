@@ -779,7 +779,7 @@ def run(
                 plot_format,
             )
         )
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     except Exception as e:
         raise click.ClickException(str(e)) from e
