@@ -171,11 +171,7 @@ async def run_single_benchmark(
     # Calculate and return metrics after finally block
     duration = time.time() - benchmark.stats.start_time
     avg_rate = benchmark.stats.total_operations / duration if duration > 0 else 0
-    avg_latency = (
-        sum(benchmark.stats.latencies) / len(benchmark.stats.latencies)
-        if benchmark.stats.latencies
-        else 0
-    )
+    avg_latency = sum(benchmark.stats.latencies) / len(benchmark.stats.latencies) if benchmark.stats.latencies else 0
     latency_samples = sample_latencies(benchmark.stats.latencies)
     return avg_rate, avg_latency, latency_samples
 
@@ -224,9 +220,7 @@ async def run_async(
             click.echo(f"Run {i}/{len(concurrency_levels)}: Testing with {c} workers")
             click.echo(f"{'=' * 60}\n")
 
-            avg_rate, avg_latency, samples = await run_single_benchmark(
-                urls, c, duration, quiet=False
-            )
+            avg_rate, avg_latency, samples = await run_single_benchmark(urls, c, duration, quiet=False)
             connections_per_sec.append(avg_rate)
             avg_latencies.append(avg_latency)
             latency_samples.append(samples)
@@ -242,9 +236,7 @@ async def run_async(
         click.echo("=" * 80)
         click.echo(f"{'Concurrency':<15} {'Conn/sec':<20} {'Avg Latency (ms)':<20}")
         click.echo("-" * 80)
-        for c, rate, latency in zip(
-            concurrency_levels, connections_per_sec, avg_latencies
-        ):
+        for c, rate, latency in zip(concurrency_levels, connections_per_sec, avg_latencies):
             click.echo(f"{c:<15} {rate:<20.1f} {latency:<20.2f}")
 
         # Save JSON results
@@ -441,25 +433,18 @@ def run(
     When multiple URLs are provided, connections are distributed round-robin across servers.
     """
     # Validate arguments
-    if concurrency is not None and (
-        concurrency_min is not None or concurrency_max is not None
-    ):
+    if concurrency is not None and (concurrency_min is not None or concurrency_max is not None):
         raise click.UsageError(
             "Cannot use --concurrency with --concurrency-min/--concurrency-max. "
             "Choose either single mode or range mode."
         )
 
     if (concurrency_min is not None) != (concurrency_max is not None):
-        raise click.UsageError(
-            "Both --concurrency-min and --concurrency-max "
-            "must be provided for range mode."
-        )
+        raise click.UsageError("Both --concurrency-min and --concurrency-max must be provided for range mode.")
 
     if concurrency_min is not None and concurrency_max is not None:
         if concurrency_min > concurrency_max:
-            raise click.UsageError(
-                "--concurrency-min must be less than or equal to --concurrency-max."
-            )
+            raise click.UsageError("--concurrency-min must be less than or equal to --concurrency-max.")
 
     if concurrency is None and concurrency_min is None:
         # Default to single mode with concurrency=10
