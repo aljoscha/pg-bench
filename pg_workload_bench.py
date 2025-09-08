@@ -147,9 +147,7 @@ def parse_ini_config(config_path: Path) -> BenchmarkConfig:
 class WorkloadBenchmark:
     """Benchmarks PostgreSQL workload throughput."""
 
-    def __init__(
-        self, postgres_urls: list[str], concurrency: int, workload: WorkloadConfig
-    ):
+    def __init__(self, postgres_urls: list[str], concurrency: int, workload: WorkloadConfig):
         self.postgres_urls = postgres_urls
         self.concurrency = concurrency
         self.workload = workload
@@ -268,9 +266,7 @@ async def run_single_workload_benchmark(
 
         setup_signal_handlers(shutdown_handler)
 
-        workers = [
-            benchmark.worker(i, benchmark.connections[i]) for i in range(concurrency)
-        ]
+        workers = [benchmark.worker(i, benchmark.connections[i]) for i in range(concurrency)]
         reporter_task = asyncio.create_task(reporter.run())
 
         # Create tasks
@@ -308,11 +304,7 @@ async def run_single_workload_benchmark(
     # Calculate metrics
     duration = time.time() - benchmark.stats.start_time
     avg_rate = benchmark.stats.total_operations / duration if duration > 0 else 0
-    avg_latency = (
-        sum(benchmark.stats.latencies) / len(benchmark.stats.latencies)
-        if benchmark.stats.latencies
-        else 0
-    )
+    avg_latency = sum(benchmark.stats.latencies) / len(benchmark.stats.latencies) if benchmark.stats.latencies else 0
     latency_samples = sample_latencies(benchmark.stats.latencies)
     return workload.name, avg_rate, avg_latency, latency_samples
 
@@ -335,9 +327,7 @@ async def run_async(
         raise click.ClickException(f"Error parsing workload: {e}") from e
 
     # Run setup queries
-    await run_queries_on_connection(
-        urls, benchmark_config.setup_queries, "setup queries"
-    )
+    await run_queries_on_connection(urls, benchmark_config.setup_queries, "setup queries")
 
     try:
         # Determine if we're in range mode or single mode
@@ -356,8 +346,7 @@ async def run_async(
             workload_names = ", ".join(w.name for w in benchmark_config.workloads)
             click.echo(f"Workloads:         {workload_names}")
             click.echo(
-                f"Concurrency Range: {benchmark_config.concurrency_min} - "
-                f"{benchmark_config.concurrency_max} workers"
+                f"Concurrency Range: {benchmark_config.concurrency_min} - {benchmark_config.concurrency_max} workers"
             )
             click.echo(f"Duration per run:  {benchmark_config.duration} seconds")
             click.echo(f"Wait between runs: {wait_between_runs} seconds")
@@ -367,17 +356,13 @@ async def run_async(
                 benchmark_config.concurrency_min, benchmark_config.concurrency_max
             )
 
-            workload_results = {
-                w.name: {"results": []} for w in benchmark_config.workloads
-            }
+            workload_results = {w.name: {"results": []} for w in benchmark_config.workloads}
 
             click.echo(f"\nTesting concurrency levels: {concurrency_levels}")
 
             for i, c in enumerate(concurrency_levels, 1):
                 click.echo(f"\n{'=' * 60}")
-                click.echo(
-                    f"Run {i}/{len(concurrency_levels)}: Testing with {c} workers"
-                )
+                click.echo(f"Run {i}/{len(concurrency_levels)}: Testing with {c} workers")
                 click.echo(f"{'=' * 60}")
 
                 for workload in benchmark_config.workloads:
@@ -386,9 +371,7 @@ async def run_async(
                         avg_rate,
                         avg_latency,
                         samples,
-                    ) = await run_single_workload_benchmark(
-                        urls, c, benchmark_config.duration, workload, quiet=False
-                    )
+                    ) = await run_single_workload_benchmark(urls, c, benchmark_config.duration, workload, quiet=False)
 
                     workload_results[workload_name]["results"].append(
                         {
@@ -405,9 +388,7 @@ async def run_async(
 
                 # Brief pause between concurrency levels
                 if i < len(concurrency_levels):
-                    click.echo(
-                        f"\nWaiting {wait_between_runs} seconds before next run..."
-                    )
+                    click.echo(f"\nWaiting {wait_between_runs} seconds before next run...")
                     await asyncio.sleep(wait_between_runs)
 
             # Generate summary table
@@ -418,9 +399,7 @@ async def run_async(
             for workload_name, data in workload_results.items():
                 click.echo(f"\nWorkload: {workload_name}")
                 click.echo("-" * 80)
-                click.echo(
-                    f"{'Concurrency':<15} {'Queries/sec':<20} {'Avg Latency (ms)':<20}"
-                )
+                click.echo(f"{'Concurrency':<15} {'Queries/sec':<20} {'Avg Latency (ms)':<20}")
                 click.echo("-" * 80)
                 for result in data["results"]:
                     click.echo(
@@ -473,9 +452,7 @@ async def run_async(
                         "concurrency_levels": [r["concurrency"] for r in results],
                         "throughput": [r["queries_per_sec"] for r in results],
                         "avg_latencies": [r["avg_latency_ms"] for r in results],
-                        "latency_samples": [
-                            r.get("latency_samples", []) for r in results
-                        ],
+                        "latency_samples": [r.get("latency_samples", []) for r in results],
                     }
                 )
 
@@ -501,9 +478,7 @@ async def run_async(
                 click.echo(f"Targets ({len(targets)} servers):")
                 for i, target in enumerate(targets, 1):
                     click.echo(f"  {i}. {target}")
-            click.echo(
-                f"Workloads:   {', '.join(w.name for w in benchmark_config.workloads)}"
-            )
+            click.echo(f"Workloads:   {', '.join(w.name for w in benchmark_config.workloads)}")
             click.echo(f"Concurrency: {concurrency} workers")
             click.echo(f"Duration:    {benchmark_config.duration} seconds")
             click.echo("=" * 60)
@@ -535,22 +510,16 @@ async def run_async(
                 "duration_per_run": benchmark_config.duration,
                 "concurrency": concurrency,
                 "workloads": {
-                    workload_name: {
-                        "results": enhance_results_with_percentiles(data["results"])
-                    }
+                    workload_name: {"results": enhance_results_with_percentiles(data["results"])}
                     for workload_name, data in workload_results.items()
                 },
             }
-            json_filename = save_json_results(
-                results_data, "pg_workload_bench", name, ",".join(urls)
-            )
+            json_filename = save_json_results(results_data, "pg_workload_bench", name, ",".join(urls))
             click.echo(f"\n✅ Raw results saved to: {json_filename}")
 
     finally:
         # Run teardown queries
-        await run_queries_on_connection(
-            urls, benchmark_config.teardown_queries, "teardown queries"
-        )
+        await run_queries_on_connection(urls, benchmark_config.teardown_queries, "teardown queries")
 
 
 def plot_from_json(
@@ -623,9 +592,7 @@ def plot_from_json(
                 base_name += f"_{output_name}"
 
             plot_filename = create_comparison_violin_plots(title, datasets, base_name)
-            click.echo(
-                f"\n✅ Comparison plot for {workload_name} saved to: {plot_filename}"
-            )
+            click.echo(f"\n✅ Comparison plot for {workload_name} saved to: {plot_filename}")
 
 
 @click.group(invoke_without_command=True)
@@ -668,9 +635,7 @@ def cli(ctx):
     default=20,
     help="Wait time in seconds between different concurrency runs (default: 20)",
 )
-def run(
-    url: tuple[str, ...], workload: str, name: Optional[str], wait_between_runs: int
-):
+def run(url: tuple[str, ...], workload: str, name: Optional[str], wait_between_runs: int):
     """Run workload benchmarks using an INI configuration file.
 
     The INI file should define workloads, setup/teardown queries, and parameters.
