@@ -184,6 +184,7 @@ async def run_async(
     duration: int,
     name: Optional[str] = None,
     wait_between_runs: int = 20,
+    plot_format: str = "png",
 ) -> None:
     """Async implementation of the connection benchmark.
 
@@ -293,7 +294,7 @@ async def run_async(
             title += f": {name}"
         title += f"\n{timestamp}"
 
-        plot_filename = create_violin_plots(title, [dataset], base_name)
+        plot_filename = create_violin_plots(title, [dataset], base_name, plot_format)
         click.echo(f"✅ Performance plots saved to: {plot_filename}")
 
     else:
@@ -306,6 +307,7 @@ async def run_async(
 def plot_from_json(
     json_files: list[str],
     output_name: Optional[str] = None,
+    plot_format: str = "png",
 ) -> None:
     """Load multiple JSON result files and create combined plots."""
     try:
@@ -348,7 +350,7 @@ def plot_from_json(
         base_name += f"_{output_name}"
 
     plot_filename = create_throughput_latency_plots(
-        title, datasets, base_name, "Connections per Second", "Average Latency (ms)"
+        title, datasets, base_name, plot_format, "Connections per Second", "Average Latency (ms)"
     )
     click.echo(f"\n✅ Comparison plot saved to: {plot_filename}")
 
@@ -413,6 +415,12 @@ def cli(ctx):
     default=20,
     help="Wait time in seconds between different concurrency runs (default: 20)",
 )
+@click.option(
+    "--plot-format",
+    type=click.Choice(["png", "svg"], case_sensitive=False),
+    default="png",
+    help="Format for output plots (default: png)",
+)
 def run(
     url: tuple[str, ...],
     concurrency: Optional[int],
@@ -421,6 +429,7 @@ def run(
     duration: int,
     name: Optional[str],
     wait_between_runs: int,
+    plot_format: str,
 ):
     """Run benchmarks on PostgreSQL database(s).
 
@@ -463,6 +472,7 @@ def run(
                 duration,
                 name,
                 wait_between_runs,
+                plot_format,
             )
         )
     except KeyboardInterrupt:
@@ -478,13 +488,19 @@ def run(
     default=None,
     help="Optional name for the output comparison plot",
 )
-def plot(json_files: tuple[str, ...], output_name: Optional[str]):
+@click.option(
+    "--plot-format",
+    type=click.Choice(["png", "svg"], case_sensitive=False),
+    default="png",
+    help="Format for output plots (default: png)",
+)
+def plot(json_files: tuple[str, ...], output_name: Optional[str], plot_format: str):
     """Create comparison plots from multiple benchmark JSON files.
 
     Example:
         pg-connection-bench plot result1.json result2.json result3.json
     """
-    plot_from_json(list(json_files), output_name)
+    plot_from_json(list(json_files), output_name, plot_format)
 
 
 if __name__ == "__main__":
