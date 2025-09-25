@@ -170,25 +170,31 @@ class WorkloadBenchmark:
 
     async def setup_connections(self) -> None:
         """Create and store persistent connections."""
+        tasks = []
+
         for i in range(self.concurrency):
-            try:
-                # Round-robin distribution across URLs
-                url_index = i % len(self.postgres_urls)
-                postgres_url = self.postgres_urls[url_index]
-                conn = await setup_database_connection(postgres_url)
-                self.connections.append(conn)
-            except Exception as e:
-                click.echo(f"Failed to create connection {i + 1}: {e}", err=True)
-                raise
+            # Round-robin distribution across URLs
+            url_index = i % len(self.postgres_urls)
+            postgres_url = self.postgres_urls[url_index]
+            tasks.append(setup_database_connection(postgres_url))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                click.echo(f"Failed to create connection {i + 1}: {result}", err=True)
+            else:
+                self.connections.append(result)
 
     async def cleanup_connections(self) -> None:
         """Close all connections."""
+        click.echo("\nClosing connections...")
+        tasks = []
         for conn in self.connections:
-            try:
-                await conn.close()
-            except Exception:
-                pass
+            tasks.append(conn.close())
+        await asyncio.gather(*tasks, return_exceptions=True)
         self.connections.clear()
+        click.echo("All connections closed")
+
 
     async def worker(self, worker_id: int, connection: asyncpg.Connection) -> None:
         """Worker that continuously executes workload queries."""
